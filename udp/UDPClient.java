@@ -19,6 +19,7 @@ public class UDPClient extends JFrame {
     private String username;
     private DefaultListModel<String> userListModel;
     private JList<String> userList;
+    private String selectedUser = "All";
     
     public UDPClient() {
         setTitle("UDP Client");
@@ -58,6 +59,12 @@ public class UDPClient extends JFrame {
         userListModel = new DefaultListModel<>();
         userList = new JList<>(userListModel);
         userList.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        userList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                selectedUser = userList.getSelectedValue();
+                updateSendButtonLabel();
+            }
+        });
         JScrollPane userScrollPane = new JScrollPane(userList);
         usersPanel.add(userScrollPane, BorderLayout.CENTER);
 
@@ -109,8 +116,6 @@ public class UDPClient extends JFrame {
     private void toggleConnection() {
         if (!isConnected) {
             connect();
-        } else {
-            disconnect();
         }
     }
     
@@ -131,7 +136,9 @@ public class UDPClient extends JFrame {
 
             messageField.setEnabled(true);
             sendButton.setEnabled(true);
-            connectButton.setText("Disconnect");
+            connectButton.setEnabled(false);
+
+            setTitle("UDP Client - " + username);
 
             statusLabel.setText("Connected as '" + username + "' (" + DEFAULT_SERVER + ":" + DEFAULT_PORT + ")");
             statusLabel.setForeground(new Color(0, 150, 0));
@@ -165,8 +172,18 @@ public class UDPClient extends JFrame {
                         if (response.startsWith("USERLIST:")) {
                             String userListStr = response.substring(9);
                             updateUserList(userListStr);
+                        } else if (response.startsWith("PRIVATE:")) {
+                            // Private message: PRIVATE:sender|MSG:message
+                            String[] parts = response.substring(8).split("\\|");
+                            if (parts.length >= 2) {
+                                String sender = parts[0];
+                                String msgContent = parts[1].substring(4);
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] (private from " + sender + "):\n");
+                                appendMessage(msgContent + "\n\n");
+                            }
                         } else {
-                            // Regular message
+                            // Regular broadcast message
                             String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
                             appendMessage("[" + timestamp + "] " + response + "\n\n");
                         }
@@ -188,23 +205,6 @@ public class UDPClient extends JFrame {
         }
     }
     
-    private void disconnect() {
-        isConnected = false;
-        if (socket != null && !socket.isClosed()) {
-            socket.close();
-        }
-
-        messageField.setEnabled(false);
-        sendButton.setEnabled(false);
-        connectButton.setText("Connect");
-
-        statusLabel.setText("Disconnected");
-        statusLabel.setForeground(Color.RED);
-
-        appendMessage("=== Disconnected from server ===\n\n");
-
-        username = null;
-    }
     
     private void sendMessage() {
         if (!isConnected) {
@@ -220,19 +220,26 @@ public class UDPClient extends JFrame {
         try {
             InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
 
-            // Format message with sender (broadcast to all users)
-            String formattedMessage = "FROM:" + username + "|MSG:" + message;
+            String formattedMessage;
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Check if a user is selected for private messaging
+            if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                // Format for private message: TO:recipient|FROM:sender|MSG:message
+                formattedMessage = "TO:" + selectedUser + "|FROM:" + username + "|MSG:" + message;
+                appendMessage("[" + timestamp + "] You (private to " + selectedUser + "):\n");
+            } else {
+                // Format for broadcast: FROM:sender|MSG:message
+                formattedMessage = "FROM:" + username + "|MSG:" + message;
+                appendMessage("[" + timestamp + "] You (broadcast to all):\n");
+            }
 
             byte[] sendData = formattedMessage.getBytes();
             DatagramPacket sendPacket = new DatagramPacket(
                 sendData, sendData.length, serverAddress, DEFAULT_PORT);
 
             socket.send(sendPacket);
-
-            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-            appendMessage("[" + timestamp + "] You (broadcast):\n");
             appendMessage(message + "\n\n");
-
             messageField.setText("");
 
         } catch (UnknownHostException e) {
@@ -242,6 +249,14 @@ public class UDPClient extends JFrame {
         }
     }
     
+    private void updateSendButtonLabel() {
+        if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+            sendButton.setText("Send to " + selectedUser);
+        } else {
+            sendButton.setText("Send to All");
+        }
+    }
+
     private void appendMessage(String message) {
         SwingUtilities.invokeLater(() -> {
             messageArea.append(message);
@@ -252,12 +267,18 @@ public class UDPClient extends JFrame {
     private void updateUserList(String userListStr) {
         SwingUtilities.invokeLater(() -> {
             userListModel.clear();
+            // Add "All" option at the top
+            userListModel.addElement("All");
             if (!userListStr.isEmpty()) {
                 String[] users = userListStr.split(",");
                 for (String user : users) {
                     userListModel.addElement(user.trim());
                 }
             }
+            // Select "All" by default
+            userList.setSelectedIndex(0);
+            selectedUser = "All";
+            updateSendButtonLabel();
         });
     }
 

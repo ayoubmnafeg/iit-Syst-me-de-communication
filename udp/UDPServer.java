@@ -137,6 +137,49 @@ public class UDPServer extends JFrame {
                                 userInfo.updateLastSeen();
                             }
                         }
+                        // Parse private message format: TO:recipient|FROM:sender|MSG:message
+                        else if (message.startsWith("TO:")) {
+                            String[] parts = message.split("\\|");
+                            if (parts.length >= 3) {
+                                String recipient = parts[0].substring(3);
+                                String sender = parts[1].substring(5);
+                                String msgContent = parts[2].substring(4);
+
+                                // Register or update sender
+                                UserInfo senderInfo = connectedUsers.get(sender);
+                                if (senderInfo == null) {
+                                    senderInfo = new UserInfo(sender, clientAddress, clientPort);
+                                    connectedUsers.put(sender, senderInfo);
+                                    String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                    appendMessage("[" + timestamp + "] User '" + sender + "' connected from " +
+                                            clientAddress.getHostAddress() + ":" + clientPort + "\n");
+                                } else {
+                                    senderInfo.updateLastSeen();
+                                }
+
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] PRIVATE from " + sender + " to " + recipient + ": " + msgContent + "\n");
+
+                                // Send private message only to the recipient
+                                UserInfo recipientInfo = connectedUsers.get(recipient);
+                                if (recipientInfo != null) {
+                                    try {
+                                        String privateMsg = "PRIVATE:" + sender + "|MSG:" + msgContent;
+                                        byte[] sendData = privateMsg.getBytes();
+                                        DatagramPacket sendPacket = new DatagramPacket(
+                                            sendData, sendData.length, recipientInfo.address, recipientInfo.port);
+                                        socket.send(sendPacket);
+                                    } catch (IOException e) {
+                                        appendMessage("Error sending private message to " + recipient + ": " + e.getMessage() + "\n");
+                                    }
+                                } else {
+                                    appendMessage("[" + timestamp + "] Recipient '" + recipient + "' not found or offline\n");
+                                }
+
+                                // Send updated user list to all clients
+                                broadcastUserList();
+                            }
+                        }
                         // Parse message format: FROM:username|MSG:message
                         else if (message.startsWith("FROM:")) {
                             String[] parts = message.split("\\|");

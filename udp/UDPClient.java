@@ -1,6 +1,7 @@
 import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.imageio.ImageIO;
+import javax.sound.sampled.LineUnavailableException;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.net.*;
@@ -16,7 +17,7 @@ public class UDPClient extends JFrame {
 
     private JTextPane messageArea;
     private JTextField messageField;
-    private JButton sendButton, clearButton, connectButton, sendImageButton, sendFileButton;
+    private JButton sendButton, clearButton, connectButton, sendImageButton, sendFileButton, recordMicButton, stopMicButton;
     private JLabel statusLabel;
     private DatagramSocket socket;
     private boolean isConnected = false;
@@ -25,6 +26,10 @@ public class UDPClient extends JFrame {
     private DefaultListModel<String> userListModel;
     private JList<String> userList;
     private String selectedUser = "All";
+
+    // Voice recording
+    private VoiceRecorder voiceRecorder;
+    private boolean isRecordingVoice = false;
 
     private static final int MAX_IMAGE_WIDTH = 150;
     private static final int MAX_IMAGE_HEIGHT = 150;
@@ -35,6 +40,52 @@ public class UDPClient extends JFrame {
 
     // File chunk reassembly
     private Map<String, FileChunkBuffer> fileChunks = new HashMap<>();
+
+    // Voice chunk reassembly
+    private Map<String, VoiceChunkBuffer> voiceChunks = new HashMap<>();
+
+    // Inner class for buffering voice chunks
+    private static class VoiceChunkBuffer {
+        String sender;
+        String recipient;
+        String[] chunks;
+        boolean[] received;
+        long createdTime;
+
+        VoiceChunkBuffer(int totalChunks, String sender, String recipient) {
+            this.sender = sender;
+            this.recipient = recipient;
+            this.chunks = new String[totalChunks];
+            this.received = new boolean[totalChunks];
+            this.createdTime = System.currentTimeMillis();
+        }
+
+        void setChunk(int index, String data) {
+            if (index < chunks.length) {
+                chunks[index] = data;
+                received[index] = true;
+            }
+        }
+
+        boolean isComplete() {
+            for (boolean r : received) {
+                if (!r) return false;
+            }
+            return true;
+        }
+
+        String getCompleteData() {
+            StringBuilder sb = new StringBuilder();
+            for (String chunk : chunks) {
+                sb.append(chunk);
+            }
+            return sb.toString();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - createdTime > 120000; // 120 second timeout for voice
+        }
+    }
 
     // Inner class for buffering file chunks
     private static class FileChunkBuffer {
@@ -193,11 +244,17 @@ public class UDPClient extends JFrame {
         sendImageButton.setEnabled(false);
         sendFileButton = new JButton("Send File");
         sendFileButton.setEnabled(false);
+        recordMicButton = new JButton("Record Voice");
+        recordMicButton.setEnabled(false);
+        stopMicButton = new JButton("Stop Recording");
+        stopMicButton.setEnabled(false);
         clearButton = new JButton("Clear");
 
         buttonPanel.add(sendButton);
         buttonPanel.add(sendImageButton);
         buttonPanel.add(sendFileButton);
+        buttonPanel.add(recordMicButton);
+        buttonPanel.add(stopMicButton);
         buttonPanel.add(clearButton);
         inputPanel.add(buttonPanel, BorderLayout.EAST);
         
@@ -217,6 +274,8 @@ public class UDPClient extends JFrame {
         sendButton.addActionListener(e -> sendMessage());
         sendImageButton.addActionListener(e -> sendImage());
         sendFileButton.addActionListener(e -> sendFile());
+        recordMicButton.addActionListener(e -> startVoiceRecording());
+        stopMicButton.addActionListener(e -> stopVoiceRecording());
         clearButton.addActionListener(e -> {
             try {
                 messageArea.getDocument().remove(0, messageArea.getDocument().getLength());
@@ -255,7 +314,11 @@ public class UDPClient extends JFrame {
             sendButton.setEnabled(true);
             sendImageButton.setEnabled(true);
             sendFileButton.setEnabled(true);
+            recordMicButton.setEnabled(true);
             connectButton.setEnabled(false);
+
+            // Initialize voice recorder
+            voiceRecorder = new VoiceRecorder();
 
             setTitle("UDP Client - " + username);
 
@@ -287,8 +350,12 @@ public class UDPClient extends JFrame {
 
                         String response = new String(receivePacket.getData(), 0, receivePacket.getLength());
 
+                        // Check if this is a voice chunk
+                        if (response.startsWith("VOICECHUNK|")) {
+                            handleVoiceChunk(response);
+                        }
                         // Check if this is a file chunk
-                        if (response.startsWith("FILECHUNK|")) {
+                        else if (response.startsWith("FILECHUNK|")) {
                             handleFileChunk(response);
                         }
                         // Check if this is an image chunk
@@ -603,6 +670,122 @@ public class UDPClient extends JFrame {
         }
     }
 
+    private void startVoiceRecording() {
+        if (!isConnected) {
+            JOptionPane.showMessageDialog(this, "Not connected to server!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        try {
+            voiceRecorder.startRecording();
+            isRecordingVoice = true;
+            recordMicButton.setEnabled(false);
+            stopMicButton.setEnabled(true);
+            messageField.setEnabled(false);
+            sendButton.setEnabled(false);
+            sendImageButton.setEnabled(false);
+            sendFileButton.setEnabled(false);
+            appendMessage("[Recording voice message...]\n");
+        } catch (LineUnavailableException e) {
+            JOptionPane.showMessageDialog(this, "Microphone not available: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void stopVoiceRecording() {
+        if (!isRecordingVoice) {
+            return;
+        }
+
+        try {
+            byte[] voiceData = voiceRecorder.stopRecording();
+            isRecordingVoice = false;
+            recordMicButton.setEnabled(true);
+            stopMicButton.setEnabled(false);
+            messageField.setEnabled(true);
+            sendButton.setEnabled(true);
+            sendImageButton.setEnabled(true);
+            sendFileButton.setEnabled(true);
+
+            if (voiceData.length > 0) {
+                appendMessage("[Voice recording complete, sending...]\n");
+                sendVoiceData(voiceData);
+            } else {
+                appendMessage("[No audio recorded]\n");
+            }
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(this, "Error stopping recording: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void sendVoiceData(byte[] voiceData) {
+        try {
+            InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Encode voice to base64
+            String voiceBase64 = Base64.getEncoder().encodeToString(voiceData);
+
+            // Split into chunks (400 bytes per chunk for safer UDP transmission)
+            int chunkSize = 400;
+            int totalChunks = (voiceBase64.length() + chunkSize - 1) / chunkSize;
+            String sessionId = Long.toHexString(System.currentTimeMillis()); // Unique ID for this transfer
+
+            if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                appendMessage("[" + timestamp + "] You (private voice to " + selectedUser + ") [" + voiceData.length + " bytes, " + totalChunks + " chunks]\n");
+            } else {
+                appendMessage("[" + timestamp + "] You (broadcast voice to all) [" + voiceData.length + " bytes, " + totalChunks + " chunks]\n");
+            }
+
+            // Create and insert clickable voice link for sent message
+            VoiceLink sentVoiceLink = new VoiceLink(username, voiceData, timestamp);
+
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    int pos = messageArea.getDocument().getLength();
+                    messageArea.setCaretPosition(pos);
+                    messageArea.insertComponent(sentVoiceLink);
+                    messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                    messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                } catch (Exception e) {
+                    appendMessage("Error displaying voice link: " + e.getMessage() + "\n\n");
+                }
+            });
+
+            // Send each chunk
+            for (int i = 0; i < totalChunks; i++) {
+                int start = i * chunkSize;
+                int end = Math.min(start + chunkSize, voiceBase64.length());
+                String chunk = voiceBase64.substring(start, end);
+
+                String formattedMessage;
+                if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                    // VOICECHUNK|SESSION:id|CHUNK:chunkNum|TOTAL:totalChunks|TO:recipient|FROM:sender|DATA:chunkData
+                    formattedMessage = "VOICECHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|TO:" + selectedUser + "|FROM:" + username + "|DATA:" + chunk;
+                } else {
+                    // VOICECHUNK|SESSION:id|CHUNK:chunkNum|TOTAL:totalChunks|FROM:sender|DATA:chunkData
+                    formattedMessage = "VOICECHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|FROM:" + username + "|DATA:" + chunk;
+                }
+
+                byte[] sendData = formattedMessage.getBytes();
+                DatagramPacket sendPacket = new DatagramPacket(
+                        sendData, sendData.length, serverAddress, DEFAULT_PORT);
+                socket.send(sendPacket);
+
+                // Small delay between chunks to avoid network flooding
+                Thread.sleep(10);
+            }
+
+            appendMessage("[Voice sent successfully]\n\n");
+
+        } catch (UnknownHostException e) {
+            JOptionPane.showMessageDialog(this, "Unknown host: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Error sending voice: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        } catch (InterruptedException e) {
+            JOptionPane.showMessageDialog(this, "Voice transfer interrupted: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
     private void updateSendButtonLabel() {
         if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
             sendButton.setText("Send to " + selectedUser);
@@ -895,6 +1078,98 @@ public class UDPClient extends JFrame {
         } catch (Exception e) {
             String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
             appendMessage("[" + timestamp + "] Error processing file chunk: " + e.getMessage() + "\n\n");
+        }
+    }
+
+    private void handleVoiceChunk(String response) {
+        try {
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Parse: VOICECHUNK|SESSION:id|CHUNK:chunkNum|TOTAL:totalChunks|[TO:recipient|]FROM:sender|DATA:chunkData
+            String[] parts = response.substring(11).split("\\|");
+
+            String sessionId = null;
+            int chunkNum = -1;
+            int totalChunks = -1;
+            String sender = null;
+            String recipient = null;
+            String chunkData = null;
+
+            for (String part : parts) {
+                if (part.startsWith("SESSION:")) {
+                    sessionId = part.substring(8);
+                } else if (part.startsWith("CHUNK:")) {
+                    chunkNum = Integer.parseInt(part.substring(6));
+                } else if (part.startsWith("TOTAL:")) {
+                    totalChunks = Integer.parseInt(part.substring(6));
+                } else if (part.startsWith("FROM:")) {
+                    sender = part.substring(5);
+                } else if (part.startsWith("TO:")) {
+                    recipient = part.substring(3);
+                } else if (part.startsWith("DATA:")) {
+                    chunkData = part.substring(5);
+                }
+            }
+
+            if (sessionId == null || chunkNum < 0 || totalChunks < 0 || sender == null || chunkData == null) {
+                appendMessage("[" + timestamp + "] Error: Invalid voice chunk\n\n");
+                return;
+            }
+
+            // Create buffer key (sender + sessionId)
+            String bufferKey = sender + "_" + sessionId;
+
+            // Get or create chunk buffer
+            VoiceChunkBuffer buffer = voiceChunks.get(bufferKey);
+            if (buffer == null) {
+                buffer = new VoiceChunkBuffer(totalChunks, sender, recipient);
+                voiceChunks.put(bufferKey, buffer);
+            }
+
+            // Add chunk to buffer
+            buffer.setChunk(chunkNum, chunkData);
+
+            // Check if all chunks received
+            if (buffer.isComplete()) {
+                voiceChunks.remove(bufferKey);
+
+                try {
+                    // Reassemble complete base64 data
+                    String completeBase64 = buffer.getCompleteData();
+
+                    // Decode base64 to get voice bytes
+                    byte[] voiceData = Base64.getDecoder().decode(completeBase64);
+
+                    if (recipient != null && !recipient.isEmpty()) {
+                        appendMessage("[" + timestamp + "] (private voice from " + sender + ") [" + voiceData.length + " bytes]:\n");
+                    } else {
+                        appendMessage("[" + timestamp + "] (voice from " + sender + ") [" + voiceData.length + " bytes]:\n");
+                    }
+
+                    // Create and insert clickable voice link
+                    VoiceLink voiceLink = new VoiceLink(sender, voiceData, timestamp);
+
+                    // Insert voice link into message area
+                    SwingUtilities.invokeLater(() -> {
+                        try {
+                            int pos = messageArea.getDocument().getLength();
+                            messageArea.setCaretPosition(pos);
+                            messageArea.insertComponent(voiceLink);
+                            messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                        } catch (Exception e) {
+                            appendMessage("Error displaying voice link: " + e.getMessage() + "\n\n");
+                        }
+                    });
+
+                } catch (IllegalArgumentException e) {
+                    appendMessage("[" + timestamp + "] Error: Could not decode voice data - " + e.getMessage() + "\n\n");
+                }
+            }
+
+        } catch (Exception e) {
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+            appendMessage("[" + timestamp + "] Error processing voice chunk: " + e.getMessage() + "\n\n");
         }
     }
 

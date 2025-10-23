@@ -102,7 +102,7 @@ public class UDPServer extends JFrame {
             appendMessage("=== Server started on port " + port + " ===\n");
             
             serverThread = new Thread(() -> {
-                byte[] receiveData = new byte[1024 * 2]; // 2KB buffer for image chunks
+                byte[] receiveData = new byte[1024 * 100]; // 100KB buffer for large chunks (voice, images, files)
 
                 while (isRunning) {
                     try {
@@ -137,8 +137,69 @@ public class UDPServer extends JFrame {
                                 userInfo.updateLastSeen();
                             }
                         }
+                        // Handle voice chunks: VOICECHUNK|SESSION:id|CHUNK:num|TOTAL:total|[TO:recipient|]FROM:sender|DATA:chunkdata
+                        if (message.startsWith("VOICECHUNK|")) {
+                            String[] parts = message.split("\\|");
+
+                            String sessionId = null;
+                            String sender = null;
+                            String recipient = null;
+                            String chunkData = null;
+
+                            for (String part : parts) {
+                                if (part.startsWith("SESSION:")) {
+                                    sessionId = part.substring(8);
+                                } else if (part.startsWith("FROM:")) {
+                                    sender = part.substring(5);
+                                } else if (part.startsWith("TO:")) {
+                                    recipient = part.substring(3);
+                                } else if (part.startsWith("DATA:")) {
+                                    chunkData = part.substring(5);
+                                }
+                            }
+
+                            if (sender != null && chunkData != null) {
+                                // Register or update sender
+                                UserInfo senderInfo = connectedUsers.get(sender);
+                                if (senderInfo == null) {
+                                    senderInfo = new UserInfo(sender, clientAddress, clientPort);
+                                    connectedUsers.put(sender, senderInfo);
+                                    String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                    appendMessage("[" + timestamp + "] User '" + sender + "' connected from " +
+                                            clientAddress.getHostAddress() + ":" + clientPort + "\n");
+                                } else {
+                                    senderInfo.updateLastSeen();
+                                }
+
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+                                // Handle private voice chunk
+                                if (recipient != null && !recipient.isEmpty()) {
+                                    appendMessage("[" + timestamp + "] PRIVATE VOICE CHUNK from " + sender + " to " + recipient + "\n");
+                                    UserInfo recipientInfo = connectedUsers.get(recipient);
+                                    if (recipientInfo != null) {
+                                        try {
+                                            // Forward chunk to recipient
+                                            byte[] sendData = message.getBytes();
+                                            DatagramPacket sendPacket = new DatagramPacket(
+                                                    sendData, sendData.length, recipientInfo.address, recipientInfo.port);
+                                            socket.send(sendPacket);
+                                        } catch (IOException e) {
+                                            appendMessage("Error sending private voice chunk to " + recipient + ": " + e.getMessage() + "\n");
+                                        }
+                                    }
+                                } else {
+                                    // Broadcast voice chunk
+                                    appendMessage("[" + timestamp + "] BROADCAST VOICE CHUNK from " + sender + "\n");
+                                    broadcastToAllUsers(message);
+                                }
+
+                                // Send updated user list to all clients
+                                broadcastUserList();
+                            }
+                        }
                         // Handle file chunks: FILECHUNK|SESSION:id|CHUNK:num|TOTAL:total|FILENAME:name|[TO:recipient|]FROM:sender|DATA:chunkdata
-                        if (message.startsWith("FILECHUNK|")) {
+                        else if (message.startsWith("FILECHUNK|")) {
                             String[] parts = message.split("\\|");
 
                             String sessionId = null;

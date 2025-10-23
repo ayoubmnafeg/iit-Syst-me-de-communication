@@ -5,6 +5,7 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.net.*;
 import java.io.*;
+import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.Base64;
@@ -553,12 +554,7 @@ public class UDPClient extends JFrame {
             }
 
             // Create and insert clickable file link for sent file
-            FileLink sentFileLink = new FileLink(filename, fileData, (fname, fdata) -> {
-                // User clicked their own sent file - show info
-                JOptionPane.showMessageDialog(this,
-                    "File: " + fname + "\nSize: " + FileTransfer.getFileSizeString(fdata.length) + "\n\nThis is your sent file.",
-                    "File Info", JOptionPane.INFORMATION_MESSAGE);
-            });
+            FileLink sentFileLink = new FileLink(filename, fileData);
 
             SwingUtilities.invokeLater(() -> {
                 try {
@@ -713,7 +709,7 @@ public class UDPClient extends JFrame {
                         return;
                     }
 
-                    // Create clickable image label
+                    // Create clickable image label with Save/Open options
                     ImageIcon imageIcon = new ImageIcon(receivedImage);
 
                     // Scale image for display if too large
@@ -729,22 +725,55 @@ public class UDPClient extends JFrame {
                         appendMessage("[" + timestamp + "] (image from " + sender + ") [" + imageData.length + " bytes]:\n");
                     }
 
-                    // Add click listener to save image
+                    // Add click listener to show Save/Open dialog for image
                     imageLabel.addMouseListener(new java.awt.event.MouseAdapter() {
                         @Override
                         public void mouseClicked(java.awt.event.MouseEvent e) {
-                            JFileChooser fileChooser = new JFileChooser();
-                            fileChooser.setSelectedFile(new File("image_" + System.currentTimeMillis() + ".jpg"));
-                            int result = fileChooser.showSaveDialog(UDPClient.this);
-                            if (result == JFileChooser.APPROVE_OPTION) {
+                            String[] options = {"Save", "Open", "Cancel"};
+                            int choice = JOptionPane.showOptionDialog(
+                                UDPClient.this,
+                                "What would you like to do with this image?",
+                                "Image Options",
+                                JOptionPane.YES_NO_CANCEL_OPTION,
+                                JOptionPane.QUESTION_MESSAGE,
+                                null,
+                                options,
+                                options[0]
+                            );
+
+                            if (choice == 0) {
+                                // Save image
+                                JFileChooser fileChooser = new JFileChooser();
+                                fileChooser.setSelectedFile(new File("image_" + System.currentTimeMillis() + ".jpg"));
+                                int result = fileChooser.showSaveDialog(UDPClient.this);
+                                if (result == JFileChooser.APPROVE_OPTION) {
+                                    try {
+                                        File saveFile = fileChooser.getSelectedFile();
+                                        FileTransfer.writeFile(saveFile, imageData);
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Image saved to: " + saveFile.getAbsolutePath() + "\n\n");
+                                    } catch (IOException ex) {
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Error saving image: " + ex.getMessage() + "\n\n");
+                                    }
+                                }
+                            } else if (choice == 1) {
+                                // Open image
                                 try {
-                                    File saveFile = fileChooser.getSelectedFile();
-                                    FileTransfer.writeFile(saveFile, imageData);
-                                    String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-                                    appendMessage("[" + saveTimestamp + "] Image saved to: " + saveFile.getAbsolutePath() + "\n\n");
+                                    File tempImageFile = Files.createTempFile("temp_image_", ".jpg").toFile();
+                                    FileTransfer.writeFile(tempImageFile, imageData);
+                                    if (java.awt.Desktop.isDesktopSupported()) {
+                                        java.awt.Desktop.getDesktop().open(tempImageFile);
+                                        tempImageFile.deleteOnExit();
+                                    } else {
+                                        JOptionPane.showMessageDialog(UDPClient.this,
+                                            "Desktop operations not supported",
+                                            "Open Error", JOptionPane.ERROR_MESSAGE);
+                                    }
                                 } catch (IOException ex) {
-                                    String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-                                    appendMessage("[" + saveTimestamp + "] Error saving image: " + ex.getMessage() + "\n\n");
+                                    JOptionPane.showMessageDialog(UDPClient.this,
+                                        "Error opening image: " + ex.getMessage(),
+                                        "Open Error", JOptionPane.ERROR_MESSAGE);
                                 }
                             }
                         }
@@ -843,24 +872,7 @@ public class UDPClient extends JFrame {
                     }
 
                     // Create and insert clickable file link
-                    FileLink fileLink = new FileLink(filename, fileData, (fname, fdata) -> {
-                        // Called when user clicks the file link
-                        JFileChooser fileChooser = new JFileChooser();
-                        fileChooser.setSelectedFile(new File(fname));
-                        int result = fileChooser.showSaveDialog(this);
-
-                        if (result == JFileChooser.APPROVE_OPTION) {
-                            try {
-                                File saveFile = fileChooser.getSelectedFile();
-                                FileTransfer.writeFile(saveFile, fdata);
-                                String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-                                appendMessage("[" + saveTimestamp + "] File saved to: " + saveFile.getAbsolutePath() + "\n\n");
-                            } catch (IOException e) {
-                                String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-                                appendMessage("[" + saveTimestamp + "] Error saving file: " + e.getMessage() + "\n\n");
-                            }
-                        }
-                    });
+                    FileLink fileLink = new FileLink(filename, fileData);
 
                     // Insert file link into message area
                     SwingUtilities.invokeLater(() -> {

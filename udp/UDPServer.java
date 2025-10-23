@@ -1,10 +1,10 @@
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.*;
 import java.net.*;
 import java.io.*;
 import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class UDPServer extends JFrame {
     private JTextArea messageArea;
@@ -14,6 +14,28 @@ public class UDPServer extends JFrame {
     private DatagramSocket socket;
     private boolean isRunning = false;
     private Thread serverThread;
+
+    // Track connected users: username -> UserInfo
+    private Map<String, UserInfo> connectedUsers = new ConcurrentHashMap<>();
+
+    // Inner class to store user information
+    private static class UserInfo {
+        String username;
+        InetAddress address;
+        int port;
+        long lastSeen;
+
+        UserInfo(String username, InetAddress address, int port) {
+            this.username = username;
+            this.address = address;
+            this.port = port;
+            this.lastSeen = System.currentTimeMillis();
+        }
+
+        void updateLastSeen() {
+            this.lastSeen = System.currentTimeMillis();
+        }
+    }
     
     public UDPServer() {
         setTitle("UDP Server");
@@ -81,27 +103,71 @@ public class UDPServer extends JFrame {
             
             serverThread = new Thread(() -> {
                 byte[] receiveData = new byte[1024];
-                
+
                 while (isRunning) {
                     try {
                         DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
                         socket.receive(receivePacket);
-                        
+
                         String message = new String(receivePacket.getData(), 0, receivePacket.getLength());
                         InetAddress clientAddress = receivePacket.getAddress();
                         int clientPort = receivePacket.getPort();
-                        
-                        String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-                        appendMessage("[" + timestamp + "] FROM " + clientAddress.getHostAddress() + ":" + clientPort + "\n");
-                        appendMessage("Message: " + message + "\n\n");
-                        
-                        // Send acknowledgment back to client
-                        String ackMessage = "Server received: " + message;
-                        byte[] sendData = ackMessage.getBytes();
-                        DatagramPacket sendPacket = new DatagramPacket(
-                            sendData, sendData.length, clientAddress, clientPort);
-                        socket.send(sendPacket);
-                        
+
+                        // Handle connection message: CONNECT:username
+                        if (message.startsWith("CONNECT:")) {
+                            String username = message.substring(8);
+                            UserInfo userInfo = connectedUsers.get(username);
+                            if (userInfo == null) {
+                                userInfo = new UserInfo(username, clientAddress, clientPort);
+                                connectedUsers.put(username, userInfo);
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] User '" + username + "' connected from " +
+                                        clientAddress.getHostAddress() + ":" + clientPort + "\n");
+
+                                // Notify all users about the new connection
+                                String joinMsg = "*** " + username + " joined the chat ***";
+                                broadcastToAllUsers(joinMsg);
+
+                                // Send updated user list to all clients
+                                broadcastUserList();
+                            } else {
+                                // Update existing user's connection info
+                                userInfo.address = clientAddress;
+                                userInfo.port = clientPort;
+                                userInfo.updateLastSeen();
+                            }
+                        }
+                        // Parse message format: FROM:username|MSG:message
+                        else if (message.startsWith("FROM:")) {
+                            String[] parts = message.split("\\|");
+                            if (parts.length >= 2) {
+                                String username = parts[0].substring(5);
+                                String msgContent = parts[1].substring(4);
+
+                                // Register or update user
+                                UserInfo userInfo = connectedUsers.get(username);
+                                if (userInfo == null) {
+                                    userInfo = new UserInfo(username, clientAddress, clientPort);
+                                    connectedUsers.put(username, userInfo);
+                                    String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                    appendMessage("[" + timestamp + "] User '" + username + "' connected from " +
+                                            clientAddress.getHostAddress() + ":" + clientPort + "\n");
+                                } else {
+                                    userInfo.updateLastSeen();
+                                }
+
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] FROM " + username + ": " + msgContent + "\n");
+
+                                // Broadcast message to all connected users
+                                String broadcastMsg = username + ": " + msgContent;
+                                broadcastToAllUsers(broadcastMsg);
+
+                                // Send updated user list to all clients
+                                broadcastUserList();
+                            }
+                        }
+
                     } catch (SocketException e) {
                         if (!isRunning) break;
                     } catch (IOException e) {
@@ -125,16 +191,57 @@ public class UDPServer extends JFrame {
         if (socket != null && !socket.isClosed()) {
             socket.close();
         }
-        
+
         startButton.setEnabled(true);
         stopButton.setEnabled(false);
         portField.setEnabled(true);
         statusLabel.setText("Server stopped");
         statusLabel.setForeground(Color.RED);
-        
+
         appendMessage("=== Server stopped ===\n\n");
+
+        // Clear connected users
+        connectedUsers.clear();
     }
-    
+
+    private void broadcastToAllUsers(String message) {
+        byte[] sendData = message.getBytes();
+
+        for (UserInfo user : connectedUsers.values()) {
+            try {
+                DatagramPacket sendPacket = new DatagramPacket(
+                    sendData, sendData.length, user.address, user.port);
+                socket.send(sendPacket);
+            } catch (IOException e) {
+                appendMessage("Error sending to " + user.username + ": " + e.getMessage() + "\n");
+            }
+        }
+    }
+
+    private void broadcastUserList() {
+        StringBuilder userListBuilder = new StringBuilder("USERLIST:");
+
+        for (String username : connectedUsers.keySet()) {
+            if (userListBuilder.length() > 9) {
+                userListBuilder.append(",");
+            }
+            userListBuilder.append(username);
+        }
+
+        String userListMsg = userListBuilder.toString();
+        byte[] sendData = userListMsg.getBytes();
+
+        for (UserInfo user : connectedUsers.values()) {
+            try {
+                DatagramPacket sendPacket = new DatagramPacket(
+                    sendData, sendData.length, user.address, user.port);
+                socket.send(sendPacket);
+            } catch (IOException e) {
+                appendMessage("Error sending user list to " + user.username + ": " + e.getMessage() + "\n");
+            }
+        }
+    }
+
     private void appendMessage(String message) {
         SwingUtilities.invokeLater(() -> {
             messageArea.append(message);

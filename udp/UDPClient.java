@@ -17,8 +17,10 @@ public class UDPClient extends JFrame {
 
     private JTextPane messageArea;
     private JTextField messageField;
+    private JTextField serverIpField;
     private JButton sendButton, clearButton, connectButton, disconnectButton, sendImageButton, sendFileButton, recordMicButton, stopMicButton;
     private JLabel statusLabel;
+    private String serverIp = DEFAULT_SERVER;
     private DatagramSocket socket;
     private boolean isConnected = false;
     private Thread receiveThread;
@@ -214,6 +216,10 @@ public class UDPClient extends JFrame {
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
         topPanel.setBorder(BorderFactory.createTitledBorder("Connection"));
 
+        topPanel.add(new JLabel("Server IP:"));
+        serverIpField = new JTextField(DEFAULT_SERVER, 15);
+        topPanel.add(serverIpField);
+
         connectButton = new JButton("Connect");
         disconnectButton = new JButton("Disconnect");
         disconnectButton.setEnabled(false);
@@ -362,7 +368,7 @@ public class UDPClient extends JFrame {
         // Send disconnect message to server before closing connection
         if (isConnected && username != null && !username.isEmpty()) {
             try {
-                InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+                InetAddress serverAddress = InetAddress.getByName(serverIp);
                 String disconnectMsg = "DISCONNECT:" + username;
                 byte[] sendData = disconnectMsg.getBytes();
                 DatagramPacket sendPacket = new DatagramPacket(
@@ -400,6 +406,7 @@ public class UDPClient extends JFrame {
         recordMicButton.setEnabled(false);
         connectButton.setEnabled(true);
         disconnectButton.setEnabled(false);
+        serverIpField.setEnabled(true);
 
         statusLabel.setText("Disconnected");
         statusLabel.setForeground(Color.RED);
@@ -408,6 +415,13 @@ public class UDPClient extends JFrame {
     }
     
     private void connect() {
+        // Get server IP from the text field
+        serverIp = serverIpField.getText().trim();
+        if (serverIp.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Server IP is required!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
         // Prompt for username
         username = JOptionPane.showInputDialog(this, "Enter your username:", "Login", JOptionPane.PLAIN_MESSAGE);
         if (username == null || username.trim().isEmpty()) {
@@ -429,20 +443,21 @@ public class UDPClient extends JFrame {
             recordMicButton.setEnabled(true);
             connectButton.setEnabled(false);
             disconnectButton.setEnabled(true);
+            serverIpField.setEnabled(false);
 
             // Initialize voice recorder
             voiceRecorder = new VoiceRecorder();
 
             setTitle("UDP Client - " + username);
 
-            statusLabel.setText("Connected as '" + username + "' (" + DEFAULT_SERVER + ":" + DEFAULT_PORT + ")");
+            statusLabel.setText("Connected as '" + username + "' (" + serverIp + ":" + DEFAULT_PORT + ")");
             statusLabel.setForeground(new Color(0, 150, 0));
 
-            appendMessage("=== Connected as '" + username + "' ===\n\n");
+            appendMessage("=== Connected as '" + username + "' to " + serverIp + ":" + DEFAULT_PORT + " ===\n\n");
 
             // Send connection message to server immediately
             try {
-                InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+                InetAddress serverAddress = InetAddress.getByName(serverIp);
                 String connectMsg = "CONNECT:" + username;
                 byte[] sendData = connectMsg.getBytes();
                 DatagramPacket sendPacket = new DatagramPacket(
@@ -460,7 +475,7 @@ public class UDPClient extends JFrame {
 
                         if (isConnected) {
                             try {
-                                InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+                                InetAddress serverAddress = InetAddress.getByName(serverIp);
                                 String heartbeatMsg = "HEARTBEAT:" + username;
                                 byte[] sendData = heartbeatMsg.getBytes();
                                 DatagramPacket sendPacket = new DatagramPacket(
@@ -576,7 +591,7 @@ public class UDPClient extends JFrame {
         }
 
         try {
-            InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+            InetAddress serverAddress = InetAddress.getByName(serverIp);
 
             String formattedMessage;
             String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
@@ -688,7 +703,7 @@ public class UDPClient extends JFrame {
 
     private void sendImageData(byte[] imageData) {
         try {
-            InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+            InetAddress serverAddress = InetAddress.getByName(serverIp);
             String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
 
             // Encode image to base64
@@ -853,7 +868,7 @@ public class UDPClient extends JFrame {
 
     private void sendFileData(String filename, byte[] fileData) {
         try {
-            InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+            InetAddress serverAddress = InetAddress.getByName(serverIp);
             String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
 
             // Encode file to base64
@@ -969,7 +984,7 @@ public class UDPClient extends JFrame {
 
     private void sendVoiceData(byte[] voiceData) {
         try {
-            InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+            InetAddress serverAddress = InetAddress.getByName(serverIp);
             String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
 
             // Encode voice to base64

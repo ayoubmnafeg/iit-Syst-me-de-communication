@@ -4,6 +4,7 @@ import java.net.*;
 import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class UDPServer extends JFrame {
@@ -17,6 +18,8 @@ public class UDPServer extends JFrame {
 
     // Track connected users: username -> UserInfo
     private Map<String, UserInfo> connectedUsers = new ConcurrentHashMap<>();
+    private static final long HEARTBEAT_TIMEOUT = 60000; // 60 seconds timeout
+    private Thread heartbeatThread;
 
     // Inner class to store user information
     private static class UserInfo {
@@ -34,6 +37,10 @@ public class UDPServer extends JFrame {
 
         void updateLastSeen() {
             this.lastSeen = System.currentTimeMillis();
+        }
+
+        boolean isTimedOut() {
+            return System.currentTimeMillis() - lastSeen > HEARTBEAT_TIMEOUT;
         }
     }
     
@@ -100,7 +107,43 @@ public class UDPServer extends JFrame {
             statusLabel.setForeground(new Color(0, 150, 0));
             
             appendMessage("=== Server started on port " + port + " ===\n");
-            
+
+            // Start heartbeat monitoring thread to detect disconnections
+            heartbeatThread = new Thread(() -> {
+                while (isRunning) {
+                    try {
+                        Thread.sleep(5000); // Check every 5 seconds
+
+                        // Check for timed out users
+                        List<String> timedOutUsers = new ArrayList<>();
+                        for (UserInfo user : connectedUsers.values()) {
+                            if (user.isTimedOut()) {
+                                timedOutUsers.add(user.username);
+                            }
+                        }
+
+                        // Remove timed out users and notify others
+                        for (String username : timedOutUsers) {
+                            connectedUsers.remove(username);
+                            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                            appendMessage("[" + timestamp + "] User '" + username + "' disconnected (timeout)\n");
+
+                            // Notify all remaining users about the disconnection
+                            String disconnectMsg = "*** " + username + " left the chat ***";
+                            broadcastToAllUsers(disconnectMsg);
+
+                            // Send updated user list to all remaining clients
+                            broadcastUserList();
+                        }
+                    } catch (InterruptedException e) {
+                        if (isRunning) {
+                            appendMessage("Heartbeat thread interrupted: " + e.getMessage() + "\n");
+                        }
+                    }
+                }
+            });
+            heartbeatThread.start();
+
             serverThread = new Thread(() -> {
                 byte[] receiveData = new byte[1024 * 100]; // 100KB buffer for large chunks (voice, images, files)
 
@@ -113,8 +156,31 @@ public class UDPServer extends JFrame {
                         InetAddress clientAddress = receivePacket.getAddress();
                         int clientPort = receivePacket.getPort();
 
+                        // Handle heartbeat message: HEARTBEAT:username
+                        if (message.startsWith("HEARTBEAT:")) {
+                            String username = message.substring(10);
+                            UserInfo userInfo = connectedUsers.get(username);
+                            if (userInfo != null) {
+                                // Update last seen time to keep connection alive
+                                userInfo.updateLastSeen();
+                            } else {
+                                // User not found, might have timed out - treat as reconnection
+                                userInfo = new UserInfo(username, clientAddress, clientPort);
+                                connectedUsers.put(username, userInfo);
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] User '" + username + "' reconnected from " +
+                                        clientAddress.getHostAddress() + ":" + clientPort + "\n");
+
+                                // Notify all users about the reconnection
+                                String joinMsg = "*** " + username + " reconnected ***";
+                                broadcastToAllUsers(joinMsg);
+
+                                // Send updated user list to all clients
+                                broadcastUserList();
+                            }
+                        }
                         // Handle connection message: CONNECT:username
-                        if (message.startsWith("CONNECT:")) {
+                        else if (message.startsWith("CONNECT:")) {
                             String username = message.substring(8);
                             UserInfo userInfo = connectedUsers.get(username);
                             if (userInfo == null) {
@@ -131,10 +197,36 @@ public class UDPServer extends JFrame {
                                 // Send updated user list to all clients
                                 broadcastUserList();
                             } else {
-                                // Update existing user's connection info
+                                // Update existing user's connection info (reconnection)
                                 userInfo.address = clientAddress;
                                 userInfo.port = clientPort;
                                 userInfo.updateLastSeen();
+
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] User '" + username + "' reconnected\n");
+
+                                // Notify about reconnection
+                                String reconnectMsg = "*** " + username + " reconnected ***";
+                                broadcastToAllUsers(reconnectMsg);
+
+                                // Send updated user list
+                                broadcastUserList();
+                            }
+                        }
+                        // Handle disconnection message: DISCONNECT:username
+                        else if (message.startsWith("DISCONNECT:")) {
+                            String username = message.substring(11);
+                            if (connectedUsers.containsKey(username)) {
+                                connectedUsers.remove(username);
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] User '" + username + "' disconnected\n");
+
+                                // Notify all users about the disconnection
+                                String leaveMsg = "*** " + username + " left the chat ***";
+                                broadcastToAllUsers(leaveMsg);
+
+                                // Send updated user list to all remaining clients
+                                broadcastUserList();
                             }
                         }
                         // Handle voice chunks: VOICECHUNK|SESSION:id|CHUNK:num|TOTAL:total|[TO:recipient|]FROM:sender|DATA:chunkdata
@@ -189,9 +281,9 @@ public class UDPServer extends JFrame {
                                         }
                                     }
                                 } else {
-                                    // Broadcast voice chunk
+                                    // Broadcast voice chunk to all except sender
                                     appendMessage("[" + timestamp + "] BROADCAST VOICE CHUNK from " + sender + "\n");
-                                    broadcastToAllUsers(message);
+                                    broadcastToAllUsers(message, sender);
                                 }
 
                                 // Send updated user list to all clients
@@ -253,9 +345,9 @@ public class UDPServer extends JFrame {
                                         }
                                     }
                                 } else {
-                                    // Broadcast file chunk
+                                    // Broadcast file chunk to all except sender
                                     appendMessage("[" + timestamp + "] BROADCAST FILE CHUNK from " + sender + " [" + filename + "]\n");
-                                    broadcastToAllUsers(message);
+                                    broadcastToAllUsers(message, sender);
                                 }
 
                                 // Send updated user list to all clients
@@ -314,9 +406,9 @@ public class UDPServer extends JFrame {
                                         }
                                     }
                                 } else {
-                                    // Broadcast image chunk
+                                    // Broadcast image chunk to all except sender
                                     appendMessage("[" + timestamp + "] BROADCAST IMAGE CHUNK from " + sender + "\n");
-                                    broadcastToAllUsers(message);
+                                    broadcastToAllUsers(message, sender);
                                 }
 
                                 // Send updated user list to all clients
@@ -388,9 +480,9 @@ public class UDPServer extends JFrame {
                                 String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
                                 appendMessage("[" + timestamp + "] FROM " + username + ": " + msgContent + "\n");
 
-                                // Broadcast message to all connected users
+                                // Broadcast message to all connected users except the sender
                                 String broadcastMsg = username + ": " + msgContent;
-                                broadcastToAllUsers(broadcastMsg);
+                                broadcastToAllUsers(broadcastMsg, username);
 
                                 // Send updated user list to all clients
                                 broadcastUserList();
@@ -421,6 +513,15 @@ public class UDPServer extends JFrame {
             socket.close();
         }
 
+        // Stop heartbeat thread
+        if (heartbeatThread != null && heartbeatThread.isAlive()) {
+            try {
+                heartbeatThread.join(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
         startButton.setEnabled(true);
         stopButton.setEnabled(false);
         portField.setEnabled(true);
@@ -434,9 +535,18 @@ public class UDPServer extends JFrame {
     }
 
     private void broadcastToAllUsers(String message) {
+        broadcastToAllUsers(message, null);
+    }
+
+    private void broadcastToAllUsers(String message, String excludeUser) {
         byte[] sendData = message.getBytes();
 
         for (UserInfo user : connectedUsers.values()) {
+            // Skip sending to the excluded user (sender)
+            if (excludeUser != null && user.username.equals(excludeUser)) {
+                continue;
+            }
+
             try {
                 DatagramPacket sendPacket = new DatagramPacket(
                     sendData, sendData.length, user.address, user.port);

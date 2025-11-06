@@ -17,19 +17,36 @@ public class UDPClient extends JFrame {
 
     private JTextPane messageArea;
     private JTextField messageField;
-    private JButton sendButton, clearButton, connectButton, sendImageButton, sendFileButton, recordMicButton, stopMicButton;
+    private JButton sendButton, clearButton, connectButton, disconnectButton, sendImageButton, sendFileButton, recordMicButton, stopMicButton;
     private JLabel statusLabel;
     private DatagramSocket socket;
     private boolean isConnected = false;
     private Thread receiveThread;
+    private Thread heartbeatThread;
     private String username;
-    private DefaultListModel<String> userListModel;
-    private JList<String> userList;
+    private DefaultListModel<UserStatus> userListModel;
+    private JList<UserStatus> userList;
     private String selectedUser = "All";
 
     // Voice recording
     private VoiceRecorder voiceRecorder;
     private boolean isRecordingVoice = false;
+
+    // Inner class to represent user status
+    private static class UserStatus {
+        String username;
+        boolean isConnected;
+
+        UserStatus(String username, boolean isConnected) {
+            this.username = username;
+            this.isConnected = isConnected;
+        }
+
+        @Override
+        public String toString() {
+            return username;
+        }
+    }
 
     private static final int MAX_IMAGE_WIDTH = 150;
     private static final int MAX_IMAGE_HEIGHT = 150;
@@ -178,15 +195,30 @@ public class UDPClient extends JFrame {
     public UDPClient() {
         setTitle("UDP Client");
         setSize(800, 550);
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         setLayout(new BorderLayout(10, 10));
+
+        // Handle window close event
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                // Disconnect before closing
+                if (isConnected) {
+                    disconnect();
+                }
+                System.exit(0);
+            }
+        });
 
         // Top Panel - Connection Settings
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
         topPanel.setBorder(BorderFactory.createTitledBorder("Connection"));
 
         connectButton = new JButton("Connect");
+        disconnectButton = new JButton("Disconnect");
+        disconnectButton.setEnabled(false);
         topPanel.add(connectButton);
+        topPanel.add(disconnectButton);
 
         add(topPanel, BorderLayout.NORTH);
 
@@ -211,12 +243,42 @@ public class UDPClient extends JFrame {
         usersPanel.setPreferredSize(new Dimension(200, 0));
 
         userListModel = new DefaultListModel<>();
+        // Add "All" option as the first item
+        userListModel.addElement(new UserStatus("All", true));
         userList = new JList<>(userListModel);
         userList.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        // Custom renderer to show connection status with colored circles
+        userList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (value instanceof UserStatus) {
+                    UserStatus status = (UserStatus) value;
+                    String displayText = status.username;
+                    // Add colored circle indicator
+                    if (status.isConnected) {
+                        displayText = "● " + displayText; // Green circle (will be colored below)
+                    } else {
+                        displayText = "● " + displayText; // Red circle (will be colored below)
+                    }
+                    label.setText(displayText);
+                    // Set text color based on connection status
+                    if (status.isConnected) {
+                        label.setForeground(new Color(0, 150, 0)); // Green for connected
+                    } else {
+                        label.setForeground(new Color(200, 0, 0)); // Red for disconnected
+                    }
+                }
+                return label;
+            }
+        });
         userList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
-                selectedUser = userList.getSelectedValue();
-                updateSendButtonLabel();
+                UserStatus selected = userList.getSelectedValue();
+                if (selected != null) {
+                    selectedUser = selected.username;
+                    updateSendButtonLabel();
+                }
             }
         });
         JScrollPane userScrollPane = new JScrollPane(userList);
@@ -271,6 +333,7 @@ public class UDPClient extends JFrame {
         
         // Button Actions
         connectButton.addActionListener(e -> toggleConnection());
+        disconnectButton.addActionListener(e -> disconnect());
         sendButton.addActionListener(e -> sendMessage());
         sendImageButton.addActionListener(e -> sendImage());
         sendFileButton.addActionListener(e -> sendFile());
@@ -294,6 +357,55 @@ public class UDPClient extends JFrame {
             connect();
         }
     }
+
+    private void disconnect() {
+        // Send disconnect message to server before closing connection
+        if (isConnected && username != null && !username.isEmpty()) {
+            try {
+                InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+                String disconnectMsg = "DISCONNECT:" + username;
+                byte[] sendData = disconnectMsg.getBytes();
+                DatagramPacket sendPacket = new DatagramPacket(
+                    sendData, sendData.length, serverAddress, DEFAULT_PORT);
+                socket.send(sendPacket);
+            } catch (Exception e) {
+                appendMessage("Error sending disconnect message: " + e.getMessage() + "\n");
+            }
+        }
+
+        isConnected = false;
+        if (socket != null && !socket.isClosed()) {
+            socket.close();
+        }
+        if (receiveThread != null && receiveThread.isAlive()) {
+            try {
+                receiveThread.join(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+        if (heartbeatThread != null && heartbeatThread.isAlive()) {
+            heartbeatThread.interrupt();
+            try {
+                heartbeatThread.join(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+        messageField.setEnabled(false);
+        sendButton.setEnabled(false);
+        sendImageButton.setEnabled(false);
+        sendFileButton.setEnabled(false);
+        recordMicButton.setEnabled(false);
+        connectButton.setEnabled(true);
+        disconnectButton.setEnabled(false);
+
+        statusLabel.setText("Disconnected");
+        statusLabel.setForeground(Color.RED);
+
+        appendMessage("\n=== Disconnected ===\n");
+    }
     
     private void connect() {
         // Prompt for username
@@ -316,6 +428,7 @@ public class UDPClient extends JFrame {
             sendFileButton.setEnabled(true);
             recordMicButton.setEnabled(true);
             connectButton.setEnabled(false);
+            disconnectButton.setEnabled(true);
 
             // Initialize voice recorder
             voiceRecorder = new VoiceRecorder();
@@ -338,6 +451,36 @@ public class UDPClient extends JFrame {
             } catch (Exception e) {
                 appendMessage("Error sending connection message: " + e.getMessage() + "\n");
             }
+
+            // Start heartbeat thread to keep connection alive
+            heartbeatThread = new Thread(() -> {
+                while (isConnected) {
+                    try {
+                        Thread.sleep(30000); // Send heartbeat every 30 seconds (half of server timeout)
+
+                        if (isConnected) {
+                            try {
+                                InetAddress serverAddress = InetAddress.getByName(DEFAULT_SERVER);
+                                String heartbeatMsg = "HEARTBEAT:" + username;
+                                byte[] sendData = heartbeatMsg.getBytes();
+                                DatagramPacket sendPacket = new DatagramPacket(
+                                    sendData, sendData.length, serverAddress, DEFAULT_PORT);
+                                socket.send(sendPacket);
+                            } catch (Exception e) {
+                                if (isConnected) {
+                                    appendMessage("Error sending heartbeat: " + e.getMessage() + "\n");
+                                }
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        if (isConnected) {
+                            appendMessage("Heartbeat thread interrupted\n");
+                        }
+                        break;
+                    }
+                }
+            });
+            heartbeatThread.start();
 
             // Start receive thread
             receiveThread = new Thread(() -> {
@@ -373,7 +516,7 @@ public class UDPClient extends JFrame {
                                 String sender = parts[0];
                                 String msgContent = parts[1].substring(4);
                                 String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-                                appendMessage("[" + timestamp + "] (private from " + sender + "):\n");
+                                appendMessage("[" + timestamp + "] (private from " + sender + "):");
                                 appendMessage(msgContent + "\n\n");
                             }
                         } else {
@@ -384,11 +527,32 @@ public class UDPClient extends JFrame {
 
                     } catch (SocketTimeoutException e) {
                         // Normal timeout, continue listening
+                    } catch (SocketException e) {
+                        // Socket closed, exit gracefully
+                        if (isConnected) {
+                            appendMessage("Connection lost: Socket closed\n");
+                            // Trigger disconnect on UI thread
+                            SwingUtilities.invokeLater(() -> {
+                                disconnect();
+                                JOptionPane.showMessageDialog(UDPClient.this,
+                                    "Connection lost. Please reconnect.",
+                                    "Connection Error",
+                                    JOptionPane.WARNING_MESSAGE);
+                            });
+                        }
+                        break;
                     } catch (IOException e) {
                         if (isConnected) {
                             appendMessage("Error receiving: " + e.getMessage() + "\n");
+                            // Don't break immediately - log the error but continue
+                            // Only break if error persists
                         }
-                        break;
+                    } catch (Exception e) {
+                        // Catch any other unexpected exceptions
+                        if (isConnected) {
+                            appendMessage("Unexpected error: " + e.getMessage() + "\n");
+                            e.printStackTrace();
+                        }
                     }
                 }
             });
@@ -421,11 +585,11 @@ public class UDPClient extends JFrame {
             if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
                 // Format for private message: TO:recipient|FROM:sender|MSG:message
                 formattedMessage = "TO:" + selectedUser + "|FROM:" + username + "|MSG:" + message;
-                appendMessage("[" + timestamp + "] You (private to " + selectedUser + "):\n");
+                appendMessage("[" + timestamp + "] You (private to " + selectedUser + "):");
             } else {
                 // Format for broadcast: FROM:sender|MSG:message
                 formattedMessage = "FROM:" + username + "|MSG:" + message;
-                appendMessage("[" + timestamp + "] You (broadcast to all):\n");
+                appendMessage("[" + timestamp + "] You (broadcast to all):");
             }
 
             byte[] sendData = formattedMessage.getBytes();
@@ -536,9 +700,98 @@ public class UDPClient extends JFrame {
             String sessionId = Long.toHexString(System.currentTimeMillis()); // Unique ID for this transfer
 
             if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
-                appendMessage("[" + timestamp + "] You (private image to " + selectedUser + ") [" + imageData.length + " bytes, " + totalChunks + " chunks]\n");
+                appendMessage("[" + timestamp + "] You (private image to " + selectedUser + ") [" + imageData.length + " bytes, " + totalChunks + " chunks]:\n");
             } else {
-                appendMessage("[" + timestamp + "] You (broadcast image to all) [" + imageData.length + " bytes, " + totalChunks + " chunks]\n");
+                appendMessage("[" + timestamp + "] You (broadcast image to all) [" + imageData.length + " bytes, " + totalChunks + " chunks]:\n");
+            }
+
+            // Display the sent image in the sender's chat window
+            try {
+                ByteArrayInputStream bais = new ByteArrayInputStream(imageData);
+                BufferedImage sentImage = ImageIO.read(bais);
+                bais.close();
+
+                if (sentImage != null) {
+                    // Create clickable image label with Save/Open options
+                    ImageIcon imageIcon = new ImageIcon(sentImage);
+
+                    // Scale image for display if too large
+                    Image scaledImage = imageIcon.getImage().getScaledInstance(200, 200, Image.SCALE_SMOOTH);
+                    ImageIcon scaledIcon = new ImageIcon(scaledImage);
+
+                    JLabel imageLabel = new JLabel(scaledIcon);
+                    imageLabel.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+                    // Add click listener to show Save/Open dialog for sent image
+                    byte[] finalImageData = imageData; // Final reference for lambda
+                    imageLabel.addMouseListener(new java.awt.event.MouseAdapter() {
+                        @Override
+                        public void mouseClicked(java.awt.event.MouseEvent e) {
+                            String[] options = {"Save", "Open", "Cancel"};
+                            int choice = JOptionPane.showOptionDialog(
+                                UDPClient.this,
+                                "What would you like to do with this image?",
+                                "Image Options",
+                                JOptionPane.YES_NO_CANCEL_OPTION,
+                                JOptionPane.QUESTION_MESSAGE,
+                                null,
+                                options,
+                                options[0]
+                            );
+
+                            if (choice == 0) {
+                                // Save image
+                                JFileChooser fileChooser = new JFileChooser();
+                                fileChooser.setSelectedFile(new File("sent_image_" + System.currentTimeMillis() + ".jpg"));
+                                int result = fileChooser.showSaveDialog(UDPClient.this);
+                                if (result == JFileChooser.APPROVE_OPTION) {
+                                    try {
+                                        File saveFile = fileChooser.getSelectedFile();
+                                        FileTransfer.writeFile(saveFile, finalImageData);
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Image saved to: " + saveFile.getAbsolutePath() + "\n\n");
+                                    } catch (IOException ex) {
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Error saving image: " + ex.getMessage() + "\n\n");
+                                    }
+                                }
+                            } else if (choice == 1) {
+                                // Open image
+                                try {
+                                    File tempImageFile = Files.createTempFile("temp_sent_image_", ".jpg").toFile();
+                                    FileTransfer.writeFile(tempImageFile, finalImageData);
+                                    if (java.awt.Desktop.isDesktopSupported()) {
+                                        java.awt.Desktop.getDesktop().open(tempImageFile);
+                                        tempImageFile.deleteOnExit();
+                                    } else {
+                                        JOptionPane.showMessageDialog(UDPClient.this,
+                                            "Desktop operations not supported",
+                                            "Open Error", JOptionPane.ERROR_MESSAGE);
+                                    }
+                                } catch (IOException ex) {
+                                    JOptionPane.showMessageDialog(UDPClient.this,
+                                        "Error opening image: " + ex.getMessage(),
+                                        "Open Error", JOptionPane.ERROR_MESSAGE);
+                                }
+                            }
+                        }
+                    });
+
+                    // Insert image into text pane
+                    SwingUtilities.invokeLater(() -> {
+                        try {
+                            int pos = messageArea.getDocument().getLength();
+                            messageArea.setCaretPosition(pos);
+                            messageArea.insertComponent(imageLabel);
+                            messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                        } catch (Exception e) {
+                            appendMessage("Error displaying sent image: " + e.getMessage() + "\n\n");
+                        }
+                    });
+                }
+            } catch (IOException e) {
+                appendMessage("Error displaying sent image: " + e.getMessage() + "\n");
             }
 
             // Send each chunk
@@ -564,9 +817,6 @@ public class UDPClient extends JFrame {
                 // Small delay between chunks to avoid network flooding
                 Thread.sleep(10);
             }
-
-            appendMessage("[Image sent successfully]\n\n");
-
         } catch (UnknownHostException e) {
             JOptionPane.showMessageDialog(this, "Unknown host: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         } catch (IOException e) {
@@ -807,15 +1057,50 @@ public class UDPClient extends JFrame {
 
     private void updateUserList(String userListStr) {
         SwingUtilities.invokeLater(() -> {
-            userListModel.clear();
-            // Add "All" option at the top
-            userListModel.addElement("All");
+            // Get list of currently connected users from server
+            Set<String> connectedUserNames = new HashSet<>();
             if (!userListStr.isEmpty()) {
                 String[] users = userListStr.split(",");
                 for (String user : users) {
-                    userListModel.addElement(user.trim());
+                    String trimmedUser = user.trim();
+                    // Don't add the current user to the list
+                    if (!trimmedUser.equals(username)) {
+                        connectedUserNames.add(trimmedUser);
+                    }
                 }
             }
+
+            // Update existing users and mark disconnected ones
+            for (int i = 0; i < userListModel.getSize(); i++) {
+                UserStatus status = userListModel.getElementAt(i);
+                if (!status.username.equals("All")) {
+                    if (!connectedUserNames.contains(status.username)) {
+                        // User is no longer in the connected list, mark as disconnected
+                        status.isConnected = false;
+                    } else {
+                        // User is still connected
+                        status.isConnected = true;
+                    }
+                }
+            }
+
+            // Add any new users not already in the list (excluding current user)
+            for (String user : connectedUserNames) {
+                boolean found = false;
+                for (int i = 0; i < userListModel.getSize(); i++) {
+                    if (userListModel.getElementAt(i).username.equals(user)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    userListModel.addElement(new UserStatus(user, true));
+                }
+            }
+
+            // Refresh the list display
+            userList.repaint();
+
             // Select "All" by default
             userList.setSelectedIndex(0);
             selectedUser = "All";

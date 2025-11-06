@@ -1,15 +1,18 @@
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.image.BufferedImage;
 import java.net.*;
 import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import javax.imageio.ImageIO;
 
 public class Emetteur extends JFrame {
     private JTextArea messageArea;
     private JTextField inputField;
     private JButton sendButton;
+    private JButton sendImageButton;
     private JButton startButton;
     private JLabel statusLabel;
 
@@ -74,9 +77,17 @@ public class Emetteur extends JFrame {
         sendButton.setEnabled(false);
         sendButton.addActionListener(e -> sendMessage());
 
+        sendImageButton = new JButton("Send Image");
+        sendImageButton.setEnabled(false);
+        sendImageButton.addActionListener(e -> sendImage());
+
+        JPanel buttonsPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        buttonsPanel.add(sendButton);
+        buttonsPanel.add(sendImageButton);
+
         bottomPanel.add(new JLabel("Message:"), BorderLayout.WEST);
         bottomPanel.add(inputField, BorderLayout.CENTER);
-        bottomPanel.add(sendButton, BorderLayout.EAST);
+        bottomPanel.add(buttonsPanel, BorderLayout.EAST);
 
         // Add all panels to frame
         add(topPanel, BorderLayout.NORTH);
@@ -126,7 +137,7 @@ public class Emetteur extends JFrame {
             group = InetAddress.getByName(MULTICAST_ADDRESS);
 
             // Join the multicast group
-            socket.joinGroup(group);
+            socket.joinGroup(new InetSocketAddress(group, 0), null);
 
             isActive = true;
             statusLabel.setText("Status: Active - " + emetteurName);
@@ -134,6 +145,7 @@ public class Emetteur extends JFrame {
             startButton.setEnabled(false);
             inputField.setEnabled(true);
             sendButton.setEnabled(true);
+            sendImageButton.setEnabled(true);
             inputField.requestFocus();
 
             appendMessage("System", "Émetteur '" + emetteurName + "' started successfully!");
@@ -192,10 +204,99 @@ public class Emetteur extends JFrame {
         });
     }
 
+    private void sendImage() {
+        if (!isActive) {
+            return;
+        }
+
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setFileFilter(new javax.swing.filechooser.FileFilter() {
+            public boolean accept(File f) {
+                return f.isDirectory() || f.getName().toLowerCase().endsWith(".jpg") || 
+                       f.getName().toLowerCase().endsWith(".png") || 
+                       f.getName().toLowerCase().endsWith(".gif");
+            }
+            public String getDescription() {
+                return "Image files (*.jpg, *.png, *.gif)";
+            }
+        });
+
+        int result = fileChooser.showOpenDialog(this);
+        if (result == JFileChooser.APPROVE_OPTION) {
+            File selectedFile = fileChooser.getSelectedFile();
+            try {
+                // Read the image file
+                BufferedImage image = ImageIO.read(selectedFile);
+                if (image == null) {
+                    throw new IOException("Failed to read image file");
+                }
+
+                // Convert image to byte array
+                ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+                ImageIO.write(image, "png", byteArrayOutputStream);
+                byte[] imageData = byteArrayOutputStream.toByteArray();
+
+                // Prepare header (format: "IMG:[ÉMETTEUR_NAME]:[FILENAME]")
+                String header = "IMG:" + emetteurName + ":" + selectedFile.getName();
+                byte[] headerBytes = header.getBytes();
+
+                // Send header first
+                DatagramPacket headerPacket = new DatagramPacket(
+                    headerBytes,
+                    headerBytes.length,
+                    group,
+                    PORT
+                );
+                socket.send(headerPacket);
+
+                // Send image data in chunks
+                int chunkSize = 60000; // Maximum UDP packet size
+                int offset = 0;
+                while (offset < imageData.length) {
+                    int length = Math.min(chunkSize, imageData.length - offset);
+                    byte[] chunk = new byte[length];
+                    System.arraycopy(imageData, offset, chunk, 0, length);
+                    
+                    DatagramPacket packet = new DatagramPacket(
+                        chunk,
+                        chunk.length,
+                        group,
+                        PORT
+                    );
+                    socket.send(packet);
+                    offset += length;
+                    
+                    // Small delay to prevent overwhelming the network
+                    Thread.sleep(10);
+                }
+
+                // Send end marker
+                String endMarker = "END:" + emetteurName;
+                byte[] endMarkerBytes = endMarker.getBytes();
+                DatagramPacket endPacket = new DatagramPacket(
+                    endMarkerBytes,
+                    endMarkerBytes.length,
+                    group,
+                    PORT
+                );
+                socket.send(endPacket);
+
+                appendMessage("System", "Image sent: " + selectedFile.getName());
+
+            } catch (IOException | InterruptedException e) {
+                appendMessage("ERROR", "Failed to send image: " + e.getMessage());
+                JOptionPane.showMessageDialog(this,
+                    "Error sending image: " + e.getMessage(),
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE);
+            }
+        }
+    }
+
     private void cleanup() {
         if (socket != null && isActive) {
             try {
-                socket.leaveGroup(group);
+                socket.leaveGroup(new InetSocketAddress(InetAddress.getByName(MULTICAST_ADDRESS), 0), null);
                 socket.close();
             } catch (IOException e) {
                 System.err.println("Error closing socket: " + e.getMessage());

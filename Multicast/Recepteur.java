@@ -1,10 +1,12 @@
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.image.BufferedImage;
 import java.net.*;
 import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import javax.imageio.ImageIO;
 
 public class Recepteur extends JFrame {
     private JTextArea messageArea;
@@ -12,6 +14,10 @@ public class Recepteur extends JFrame {
     private JButton stopButton;
     private JLabel statusLabel;
     private JLabel receivedCountLabel;
+    private ByteArrayOutputStream imageBuffer;
+    private boolean receivingImage = false;
+    private String currentImageSender;
+    private String currentImageName;
 
     private MulticastSocket socket;
     private InetAddress group;
@@ -136,7 +142,7 @@ public class Recepteur extends JFrame {
             group = InetAddress.getByName(MULTICAST_ADDRESS);
 
             // Join the multicast group
-            socket.joinGroup(group);
+            socket.joinGroup(new InetSocketAddress(group, 0), null);
 
             isRunning = true;
             statusLabel.setText("Status: Listening - " + recepteurName);
@@ -179,20 +185,68 @@ public class Recepteur extends JFrame {
     }
 
     private void receiveMessages() {
-        byte[] buffer = new byte[1024];
+        byte[] buffer = new byte[65535]; // Increased buffer size for image data
 
         while (isRunning) {
             try {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
 
-                String message = new String(packet.getData(), 0, packet.getLength());
+                byte[] data = packet.getData();
+                int length = packet.getLength();
 
-                // Display received message
-                displayReceivedMessage(message);
+                if (!receivingImage) {
+                    // Try to parse as text message
+                    String message = new String(data, 0, length);
 
-                messageCount++;
-                updateMessageCount();
+                    if (message.startsWith("IMG:")) {
+                        // Start of image transfer
+                        String[] parts = message.split(":");
+                        if (parts.length == 3) {
+                            receivingImage = true;
+                            currentImageSender = parts[1];
+                            currentImageName = parts[2];
+                            imageBuffer = new ByteArrayOutputStream();
+                            appendMessage("System", "Receiving image from " + currentImageSender + ": " + currentImageName);
+                        }
+                    } else if (!message.startsWith("END:")) {
+                        // Regular text message
+                        displayReceivedMessage(message);
+                        messageCount++;
+                        updateMessageCount();
+                    }
+                } else {
+                    // Check if this is the end marker
+                    String possibleEnd = new String(data, 0, Math.min(20, length));
+                    if (possibleEnd.startsWith("END:")) {
+                        // Image transfer complete
+                        try {
+                            byte[] imageData = imageBuffer.toByteArray();
+                            ByteArrayInputStream bis = new ByteArrayInputStream(imageData);
+                            BufferedImage image = ImageIO.read(bis);
+
+                            if (image != null) {
+                                displayReceivedImage(image);
+                                appendMessage("System", "Image received successfully from " + currentImageSender);
+                            } else {
+                                appendMessage("ERROR", "Failed to decode received image");
+                            }
+                        } catch (Exception e) {
+                            appendMessage("ERROR", "Error processing received image: " + e.getMessage());
+                        }
+
+                        // Reset image receiving state
+                        receivingImage = false;
+                        imageBuffer = null;
+                        currentImageSender = null;
+                        currentImageName = null;
+                        messageCount++;
+                        updateMessageCount();
+                    } else {
+                        // Append image data
+                        imageBuffer.write(data, 0, length);
+                    }
+                }
 
             } catch (IOException e) {
                 if (isRunning) {
@@ -200,6 +254,37 @@ public class Recepteur extends JFrame {
                 }
             }
         }
+    }
+
+    private void displayReceivedImage(BufferedImage image) {
+        SwingUtilities.invokeLater(() -> {
+            // Create a new window to display the image
+            JFrame imageFrame = new JFrame("Image from " + currentImageSender + " - " + currentImageName);
+            imageFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+
+            // Scale the image if it's too large
+            int maxWidth = 800;
+            int maxHeight = 600;
+            
+            int width = image.getWidth();
+            int height = image.getHeight();
+            
+            if (width > maxWidth || height > maxHeight) {
+                double scale = Math.min((double)maxWidth/width, (double)maxHeight/height);
+                width = (int)(width * scale);
+                height = (int)(height * scale);
+            }
+
+            // Create a label with the scaled image
+            ImageIcon imageIcon = new ImageIcon(image.getScaledInstance(width, height, Image.SCALE_SMOOTH));
+            JLabel imageLabel = new JLabel(imageIcon);
+            imageFrame.add(imageLabel);
+
+            // Pack and show the window
+            imageFrame.pack();
+            imageFrame.setLocationRelativeTo(this);
+            imageFrame.setVisible(true);
+        });
     }
 
     private void displayReceivedMessage(String message) {
@@ -228,7 +313,7 @@ public class Recepteur extends JFrame {
         if (socket != null && !socket.isClosed()) {
             try {
                 if (group != null) {
-                    socket.leaveGroup(group);
+                    socket.leaveGroup(new InetSocketAddress(group, 0), null);
                 }
                 socket.close();
             } catch (IOException e) {

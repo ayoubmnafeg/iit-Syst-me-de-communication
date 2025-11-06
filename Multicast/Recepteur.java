@@ -1,4 +1,5 @@
 import javax.swing.*;
+import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
@@ -9,7 +10,8 @@ import java.util.Date;
 import javax.imageio.ImageIO;
 
 public class Recepteur extends JFrame {
-    private JTextArea messageArea;
+    private JTextPane messageArea;
+    private StyledDocument doc;
     private JButton startButton;
     private JButton stopButton;
     private JLabel statusLabel;
@@ -73,13 +75,13 @@ public class Recepteur extends JFrame {
         JLabel messageLabel = new JLabel("Received Messages:");
         messageLabel.setFont(new Font("Arial", Font.BOLD, 12));
 
-        messageArea = new JTextArea();
+        messageArea = new JTextPane();
         messageArea.setEditable(false);
         messageArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
-        messageArea.setLineWrap(true);
-        messageArea.setWrapStyleWord(true);
+        doc = messageArea.getStyledDocument();
         JScrollPane scrollPane = new JScrollPane(messageArea);
         scrollPane.setPreferredSize(new Dimension(500, 350));
+        scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
 
         centerPanel.add(messageLabel, BorderLayout.NORTH);
         centerPanel.add(scrollPane, BorderLayout.CENTER);
@@ -258,48 +260,65 @@ public class Recepteur extends JFrame {
 
     private void displayReceivedImage(BufferedImage image) {
         SwingUtilities.invokeLater(() -> {
-            // Create a new window to display the image
-            JFrame imageFrame = new JFrame("Image from " + currentImageSender + " - " + currentImageName);
-            imageFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+            try {
+                // Add timestamp and sender info
+                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                String header = "[" + timestamp + "] Image from " + currentImageSender + " (" + currentImageName + "):\n";
+                doc.insertString(doc.getLength(), header, null);
 
-            // Scale the image if it's too large
-            int maxWidth = 800;
-            int maxHeight = 600;
-            
-            int width = image.getWidth();
-            int height = image.getHeight();
-            
-            if (width > maxWidth || height > maxHeight) {
-                double scale = Math.min((double)maxWidth/width, (double)maxHeight/height);
-                width = (int)(width * scale);
-                height = (int)(height * scale);
+                // Scale the image if it's too large for inline display
+                int maxWidth = 400;
+                int maxHeight = 300;
+
+                int width = image.getWidth();
+                int height = image.getHeight();
+
+                if (width > maxWidth || height > maxHeight) {
+                    double scale = Math.min((double)maxWidth/width, (double)maxHeight/height);
+                    width = (int)(width * scale);
+                    height = (int)(height * scale);
+                }
+
+                // Create a scaled image icon
+                ImageIcon imageIcon = new ImageIcon(image.getScaledInstance(width, height, Image.SCALE_SMOOTH));
+
+                // Insert the image into the document
+                messageArea.setCaretPosition(doc.getLength());
+                messageArea.insertIcon(imageIcon);
+
+                // Add a newline after the image
+                doc.insertString(doc.getLength(), "\n", null);
+
+                // Auto-scroll to bottom
+                messageArea.setCaretPosition(doc.getLength());
+
+            } catch (BadLocationException e) {
+                appendMessage("ERROR", "Failed to display image: " + e.getMessage());
             }
-
-            // Create a label with the scaled image
-            ImageIcon imageIcon = new ImageIcon(image.getScaledInstance(width, height, Image.SCALE_SMOOTH));
-            JLabel imageLabel = new JLabel(imageIcon);
-            imageFrame.add(imageLabel);
-
-            // Pack and show the window
-            imageFrame.pack();
-            imageFrame.setLocationRelativeTo(this);
-            imageFrame.setVisible(true);
         });
     }
 
     private void displayReceivedMessage(String message) {
         SwingUtilities.invokeLater(() -> {
-            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-            messageArea.append("[" + timestamp + "] " + message + "\n");
-            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+            try {
+                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                doc.insertString(doc.getLength(), "[" + timestamp + "] " + message + "\n", null);
+                messageArea.setCaretPosition(doc.getLength());
+            } catch (BadLocationException e) {
+                System.err.println("Error displaying message: " + e.getMessage());
+            }
         });
     }
 
     private void appendMessage(String sender, String message) {
         SwingUtilities.invokeLater(() -> {
-            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
-            messageArea.append("[" + timestamp + "] " + sender + ": " + message + "\n");
-            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+            try {
+                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                doc.insertString(doc.getLength(), "[" + timestamp + "] " + sender + ": " + message + "\n", null);
+                messageArea.setCaretPosition(doc.getLength());
+            } catch (BadLocationException e) {
+                System.err.println("Error appending message: " + e.getMessage());
+            }
         });
     }
 

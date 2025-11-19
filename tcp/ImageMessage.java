@@ -7,7 +7,7 @@ import java.util.Base64;
  */
 public class ImageMessage implements Serializable {
     private static final long serialVersionUID = 1L;
-    private static final int MAX_IMAGE_SIZE = 50000; // Max 50KB
+    private static final int MAX_IMAGE_SIZE = 50000; // Max 50KB for transmission
 
     private String sender;
     private String recipient; // null for broadcast

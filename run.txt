@@ -1,0 +1,3 @@
+cd "c:/Workspace/iit-Syst-me-de-communication/udp" ; javac -encoding UTF-8 *.java ; java run
+cd "c:/Workspace/iit-Syst-me-de-communication/tcp" ; javac -encoding UTF-8 *.java ; java run
+cd "c:/Workspace/iit-Syst-me-de-communication/Multicast" ; javac -encoding UTF-8 *.java ; java MulticastApp

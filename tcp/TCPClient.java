@@ -10,10 +10,6 @@ import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.Base64;
-import java.awt.event.MouseAdapter;
-import javax.swing.text.Document;
-import javax.swing.text.html.HTMLEditorKit;
-import javax.swing.text.html.HTMLDocument;
 
 public class TCPClient extends JFrame {
     private static final String DEFAULT_SERVER = "localhost";
@@ -21,11 +17,13 @@ public class TCPClient extends JFrame {
 
     private JTextPane messageArea;
     private JTextField messageField;
+    private JTextField serverIpField;
     private JButton sendButton, clearButton, connectButton, disconnectButton, sendImageButton, sendFileButton, recordMicButton, stopMicButton;
     private JLabel statusLabel;
+    private String serverIp = DEFAULT_SERVER;
     private Socket socket;
-    private PrintWriter out;
     private BufferedReader in;
+    private PrintWriter out;
     private boolean isConnected = false;
     private Thread receiveThread;
     private Thread heartbeatThread;
@@ -33,7 +31,6 @@ public class TCPClient extends JFrame {
     private DefaultListModel<UserStatus> userListModel;
     private JList<UserStatus> userList;
     private String selectedUser = "All";
-    private long lastHeartbeat = 0;
 
     // Voice recording
     private VoiceRecorder voiceRecorder;
@@ -105,21 +102,25 @@ public class TCPClient extends JFrame {
             }
             return sb.toString();
         }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - createdTime > 120000; // 120 second timeout for voice
+        }
     }
 
     // Inner class for buffering file chunks
     private static class FileChunkBuffer {
-        String filename;
         String sender;
         String recipient;
+        String filename;
         String[] chunks;
         boolean[] received;
         long createdTime;
 
-        FileChunkBuffer(int totalChunks, String filename, String sender, String recipient) {
-            this.filename = filename;
+        FileChunkBuffer(int totalChunks, String sender, String recipient, String filename) {
             this.sender = sender;
             this.recipient = recipient;
+            this.filename = filename;
             this.chunks = new String[totalChunks];
             this.received = new boolean[totalChunks];
             this.createdTime = System.currentTimeMillis();
@@ -145,6 +146,10 @@ public class TCPClient extends JFrame {
                 sb.append(chunk);
             }
             return sb.toString();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - createdTime > 60000; // 60 second timeout
         }
     }
 
@@ -185,64 +190,94 @@ public class TCPClient extends JFrame {
             }
             return sb.toString();
         }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - createdTime > 30000; // 30 second timeout
+        }
     }
 
-    public TCPClient(String username) {
-        this.username = username;
-        setTitle("TCP Client - " + username);
-        setSize(800, 600);
+    public TCPClient() {
+        setTitle("TCP Client");
+        setSize(800, 550);
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+        setLayout(new BorderLayout(10, 10));
+
+        // Handle window close event
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
-            public void windowClosing(java.awt.event.WindowEvent windowEvent) {
-                disconnect();
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                // Disconnect before closing
+                if (isConnected) {
+                    disconnect();
+                }
                 System.exit(0);
             }
         });
-        setLayout(new BorderLayout());
 
-        // Top panel with connection buttons
-        JPanel topPanel = new JPanel();
+        // Top Panel - Connection Settings
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 10));
+        topPanel.setBorder(BorderFactory.createTitledBorder("Connection"));
+
+        topPanel.add(new JLabel("Server IP:"));
+        serverIpField = new JTextField(DEFAULT_SERVER, 15);
+        topPanel.add(serverIpField);
+
         connectButton = new JButton("Connect");
         disconnectButton = new JButton("Disconnect");
         disconnectButton.setEnabled(false);
         topPanel.add(connectButton);
         topPanel.add(disconnectButton);
+
         add(topPanel, BorderLayout.NORTH);
 
-        // Center panel with split layout
-        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
-        splitPane.setResizeWeight(0.7);
+        // Center Panel - Message Display and User List
+        JPanel centerPanel = new JPanel(new BorderLayout(5, 5));
 
-        // Message area on the left
+        // Message display on the left
+        JPanel messagePanel = new JPanel(new BorderLayout(5, 5));
+        messagePanel.setBorder(BorderFactory.createTitledBorder("Messages"));
+
         messageArea = new JTextPane();
         messageArea.setEditable(false);
-        messageArea.setContentType("text/html");
+        messageArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
         JScrollPane messageScrollPane = new JScrollPane(messageArea);
-        splitPane.setLeftComponent(messageScrollPane);
+        messagePanel.add(messageScrollPane, BorderLayout.CENTER);
 
-        // User list on the right
+        centerPanel.add(messagePanel, BorderLayout.CENTER);
+
+        // Connected Users list on the right
+        JPanel usersPanel = new JPanel(new BorderLayout(5, 5));
+        usersPanel.setBorder(BorderFactory.createTitledBorder("Connected Users"));
+        usersPanel.setPreferredSize(new Dimension(200, 0));
+
         userListModel = new DefaultListModel<>();
+        // Add "All" option as the first item
         userListModel.addElement(new UserStatus("All", true));
         userList = new JList<>(userListModel);
-        userList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        userList.setSelectedIndex(0);
+        userList.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        // Custom renderer to show connection status with colored circles
         userList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
             public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
-                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
                 if (value instanceof UserStatus) {
                     UserStatus status = (UserStatus) value;
-                    setText(status.username);
-                    if (status.username.equals(username)) {
-                        setForeground(Color.GREEN);
-                    } else if (!status.isConnected) {
-                        setForeground(Color.RED);
+                    String displayText = status.username;
+                    // Add colored circle indicator
+                    if (status.isConnected) {
+                        displayText = "● " + displayText;
                     } else {
-                        setForeground(Color.BLACK);
+                        displayText = "● " + displayText;
+                    }
+                    label.setText(displayText);
+                    // Set text color based on connection status
+                    if (status.isConnected) {
+                        label.setForeground(new Color(0, 150, 0)); // Green for connected
+                    } else {
+                        label.setForeground(new Color(200, 0, 0)); // Red for disconnected
                     }
                 }
-                return this;
+                return label;
             }
         });
         userList.addListSelectionListener(e -> {
@@ -250,42 +285,40 @@ public class TCPClient extends JFrame {
                 UserStatus selected = userList.getSelectedValue();
                 if (selected != null) {
                     selectedUser = selected.username;
+                    updateSendButtonLabel();
                 }
             }
         });
         JScrollPane userScrollPane = new JScrollPane(userList);
-        userScrollPane.setPreferredSize(new Dimension(150, 0));
-        splitPane.setRightComponent(userScrollPane);
+        usersPanel.add(userScrollPane, BorderLayout.CENTER);
 
-        add(splitPane, BorderLayout.CENTER);
+        centerPanel.add(usersPanel, BorderLayout.EAST);
 
-        // Bottom panel with input and buttons
-        JPanel bottomPanel = new JPanel(new BorderLayout());
+        add(centerPanel, BorderLayout.CENTER);
 
-        JPanel inputPanel = new JPanel(new BorderLayout());
+        // Bottom Panel - Message Input
+        JPanel bottomPanel = new JPanel(new BorderLayout(5, 5));
+        bottomPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+
+        JPanel inputPanel = new JPanel(new BorderLayout(5, 5));
+        inputPanel.setBorder(BorderFactory.createTitledBorder("Send Message"));
+
         messageField = new JTextField();
         messageField.setEnabled(false);
-        messageField.addActionListener(e -> sendMessage());
         inputPanel.add(messageField, BorderLayout.CENTER);
 
-        JPanel buttonPanel = new JPanel();
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         sendButton = new JButton("Send");
         sendButton.setEnabled(false);
-        sendButton.addActionListener(e -> sendMessage());
         sendImageButton = new JButton("Send Image");
         sendImageButton.setEnabled(false);
-        sendImageButton.addActionListener(e -> sendImage());
         sendFileButton = new JButton("Send File");
         sendFileButton.setEnabled(false);
-        sendFileButton.addActionListener(e -> sendFile());
         recordMicButton = new JButton("Record Voice");
         recordMicButton.setEnabled(false);
-        recordMicButton.addActionListener(e -> startVoiceRecording());
         stopMicButton = new JButton("Stop Recording");
         stopMicButton.setEnabled(false);
-        stopMicButton.addActionListener(e -> stopVoiceRecording());
         clearButton = new JButton("Clear");
-        clearButton.addActionListener(e -> messageArea.setText(""));
 
         buttonPanel.add(sendButton);
         buttonPanel.add(sendImageButton);
@@ -293,158 +326,737 @@ public class TCPClient extends JFrame {
         buttonPanel.add(recordMicButton);
         buttonPanel.add(stopMicButton);
         buttonPanel.add(clearButton);
+        inputPanel.add(buttonPanel, BorderLayout.EAST);
 
         bottomPanel.add(inputPanel, BorderLayout.CENTER);
-        bottomPanel.add(buttonPanel, BorderLayout.SOUTH);
 
+        // Status Panel
+        JPanel statusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         statusLabel = new JLabel("Disconnected");
         statusLabel.setForeground(Color.RED);
-        bottomPanel.add(statusLabel, BorderLayout.NORTH);
+        statusPanel.add(statusLabel);
+        bottomPanel.add(statusPanel, BorderLayout.SOUTH);
 
         add(bottomPanel, BorderLayout.SOUTH);
 
-        // Button actions
-        connectButton.addActionListener(e -> connect());
+        // Button Actions
+        connectButton.addActionListener(e -> toggleConnection());
         disconnectButton.addActionListener(e -> disconnect());
+        sendButton.addActionListener(e -> sendMessage());
+        sendImageButton.addActionListener(e -> sendImage());
+        sendFileButton.addActionListener(e -> sendFile());
+        recordMicButton.addActionListener(e -> startVoiceRecording());
+        stopMicButton.addActionListener(e -> stopVoiceRecording());
+        clearButton.addActionListener(e -> {
+            try {
+                messageArea.getDocument().remove(0, messageArea.getDocument().getLength());
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
+        });
 
-        setVisible(true);
+        messageField.addActionListener(e -> sendMessage());
+
+        setLocationRelativeTo(null);
     }
 
-    private void connect() {
-        try {
-            socket = new Socket(DEFAULT_SERVER, DEFAULT_PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-
-            isConnected = true;
-            connectButton.setEnabled(false);
-            disconnectButton.setEnabled(true);
-            sendButton.setEnabled(true);
-            sendImageButton.setEnabled(true);
-            sendFileButton.setEnabled(true);
-            recordMicButton.setEnabled(true);
-            messageField.setEnabled(true);
-            statusLabel.setText("Connected to " + DEFAULT_SERVER + ":" + DEFAULT_PORT);
-            statusLabel.setForeground(Color.GREEN);
-
-            // Send connection message
-            out.println("CONNECT:" + username);
-
-            // Start receive thread
-            receiveThread = new Thread(this::receiveMessages);
-            receiveThread.start();
-
-            appendMessage("Connected to server", Color.BLUE);
-
-        } catch (IOException e) {
-            JOptionPane.showMessageDialog(this, "Failed to connect: " + e.getMessage(), "Connection Error", JOptionPane.ERROR_MESSAGE);
+    private void toggleConnection() {
+        if (!isConnected) {
+            connect();
         }
     }
 
     private void disconnect() {
-        if (isConnected) {
+        // Send disconnect message to server before closing connection
+        if (isConnected && username != null && !username.isEmpty()) {
             try {
                 out.println("DISCONNECT:" + username);
-                isConnected = false;
+            } catch (Exception e) {
+                appendMessage("Error sending disconnect message: " + e.getMessage() + "\n");
+            }
+        }
+
+        isConnected = false;
+
+        try {
+            if (socket != null && !socket.isClosed()) {
                 socket.close();
-            } catch (IOException e) {
-                // Ignore
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        if (receiveThread != null && receiveThread.isAlive()) {
+            try {
+                receiveThread.join(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+        if (heartbeatThread != null && heartbeatThread.isAlive()) {
+            heartbeatThread.interrupt();
+            try {
+                heartbeatThread.join(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+        messageField.setEnabled(false);
+        sendButton.setEnabled(false);
+        sendImageButton.setEnabled(false);
+        sendFileButton.setEnabled(false);
+        recordMicButton.setEnabled(false);
+        connectButton.setEnabled(true);
+        disconnectButton.setEnabled(false);
+        serverIpField.setEnabled(true);
+
+        statusLabel.setText("Disconnected");
+        statusLabel.setForeground(Color.RED);
+
+        appendMessage("\n=== Disconnected ===\n");
+    }
+
+    private void connect() {
+        // Get server IP from the text field
+        serverIp = serverIpField.getText().trim();
+        if (serverIp.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Server IP is required!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        // Prompt for username
+        username = JOptionPane.showInputDialog(this, "Enter your username:", "Login", JOptionPane.PLAIN_MESSAGE);
+        if (username == null || username.trim().isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Username is required!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        username = username.trim();
+
+        try {
+            socket = new Socket(serverIp, DEFAULT_PORT);
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            out = new PrintWriter(socket.getOutputStream(), true);
+            isConnected = true;
+
+            messageField.setEnabled(true);
+            sendButton.setEnabled(true);
+            sendImageButton.setEnabled(true);
+            sendFileButton.setEnabled(true);
+            recordMicButton.setEnabled(true);
+            connectButton.setEnabled(false);
+            disconnectButton.setEnabled(true);
+            serverIpField.setEnabled(false);
+
+            // Initialize voice recorder
+            voiceRecorder = new VoiceRecorder();
+
+            setTitle("TCP Client - " + username);
+
+            statusLabel.setText("Connected as '" + username + "' (" + serverIp + ":" + DEFAULT_PORT + ")");
+            statusLabel.setForeground(new Color(0, 150, 0));
+
+            appendMessage("=== Connected as '" + username + "' to " + serverIp + ":" + DEFAULT_PORT + " ===\n\n");
+
+            // Send connection message to server immediately
+            out.println("CONNECT:" + username);
+
+            // Start heartbeat thread to keep connection alive
+            heartbeatThread = new Thread(() -> {
+                while (isConnected) {
+                    try {
+                        Thread.sleep(30000); // Send heartbeat every 30 seconds
+
+                        if (isConnected) {
+                            out.println("HEARTBEAT:" + username);
+                        }
+                    } catch (InterruptedException e) {
+                        if (isConnected) {
+                            appendMessage("Heartbeat thread interrupted\n");
+                        }
+                        break;
+                    }
+                }
+            });
+            heartbeatThread.start();
+
+            // Start receive thread
+            receiveThread = new Thread(() -> {
+                try {
+                    String response;
+                    while ((response = in.readLine()) != null) {
+                        // Check if this is a voice chunk
+                        if (response.startsWith("VOICECHUNK|")) {
+                            handleVoiceChunk(response);
+                        }
+                        // Check if this is a file chunk
+                        else if (response.startsWith("FILECHUNK|")) {
+                            handleFileChunk(response);
+                        }
+                        // Check if this is an image chunk
+                        else if (response.startsWith("IMGCHUNK|")) {
+                            handleImageChunk(response);
+                        }
+                        // Check if this is a user list update
+                        else if (response.startsWith("USERLIST:")) {
+                            String userListStr = response.substring(9);
+                            updateUserList(userListStr);
+                        } else if (response.startsWith("PRIVATE:")) {
+                            // Private message: PRIVATE:sender|MSG:message
+                            String[] parts = response.substring(8).split("\\|");
+                            if (parts.length >= 2) {
+                                String sender = parts[0];
+                                String msgContent = parts[1].substring(4);
+                                String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                appendMessage("[" + timestamp + "] (private from " + sender + "):");
+                                appendMessage(msgContent + "\n\n");
+                            }
+                        } else {
+                            // Regular broadcast message
+                            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                            appendMessage("[" + timestamp + "] " + response + "\n\n");
+                        }
+                    }
+                } catch (SocketException e) {
+                    // Socket closed, exit gracefully
+                    if (isConnected) {
+                        appendMessage("Connection lost: Socket closed\n");
+                        // Trigger disconnect on UI thread
+                        SwingUtilities.invokeLater(() -> {
+                            disconnect();
+                            JOptionPane.showMessageDialog(TCPClient.this,
+                                    "Connection lost. Please reconnect.",
+                                    "Connection Error",
+                                    JOptionPane.WARNING_MESSAGE);
+                        });
+                    }
+                } catch (IOException e) {
+                    if (isConnected) {
+                        appendMessage("Error receiving: " + e.getMessage() + "\n");
+                    }
+                }
+            });
+            receiveThread.start();
+
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Could not connect: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void sendMessage() {
+        if (!isConnected) {
+            JOptionPane.showMessageDialog(this, "Not connected to server!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        String message = messageField.getText().trim();
+        if (message.isEmpty()) {
+            return;
+        }
+
+        String formattedMessage;
+        String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+        // Check if a user is selected for private messaging
+        if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+            // Format for private message: TO:recipient|FROM:sender|MSG:message
+            formattedMessage = "TO:" + selectedUser + "|FROM:" + username + "|MSG:" + message;
+            appendMessage("[" + timestamp + "] You (private to " + selectedUser + "):");
+        } else {
+            // Format for broadcast: FROM:sender|MSG:message
+            formattedMessage = "FROM:" + username + "|MSG:" + message;
+            appendMessage("[" + timestamp + "] You (broadcast to all):");
+        }
+
+        out.println(formattedMessage);
+        appendMessage(message + "\n\n");
+        messageField.setText("");
+    }
+
+    private void sendImage() {
+        if (!isConnected) {
+            JOptionPane.showMessageDialog(this, "Not connected to server!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        // Open file chooser for image selection
+        JFileChooser fileChooser = new JFileChooser();
+        FileNameExtensionFilter filter = new FileNameExtensionFilter(
+                "Image Files", "jpg", "jpeg", "png", "gif", "bmp");
+        fileChooser.setFileFilter(filter);
+
+        int result = fileChooser.showOpenDialog(this);
+        if (result != JFileChooser.APPROVE_OPTION) {
+            return; // User cancelled
+        }
+
+        File selectedFile = fileChooser.getSelectedFile();
+
+        // Load and compress image
+        try {
+            BufferedImage originalImage = ImageIO.read(selectedFile);
+            if (originalImage == null) {
+                JOptionPane.showMessageDialog(this, "Could not read image file!", "Error", JOptionPane.ERROR_MESSAGE);
+                return;
             }
 
-            connectButton.setEnabled(true);
-            disconnectButton.setEnabled(false);
+            // Resize image to fit within max dimensions
+            BufferedImage resizedImage = resizeImage(originalImage, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+
+            // Compress and convert to bytes
+            byte[] compressedImageData = compressImage(resizedImage);
+
+            if (compressedImageData.length > MAX_IMAGE_SIZE) {
+                JOptionPane.showMessageDialog(this,
+                        "Image too large! Max size is " + MAX_IMAGE_SIZE + " bytes, got " + compressedImageData.length + " bytes",
+                        "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            // Send image
+            sendImageData(compressedImageData);
+
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Error reading image: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private BufferedImage resizeImage(BufferedImage originalImage, int maxWidth, int maxHeight) {
+        int width = originalImage.getWidth();
+        int height = originalImage.getHeight();
+
+        // Calculate scaling factor
+        double scale = Math.min((double) maxWidth / width, (double) maxHeight / height);
+
+        if (scale >= 1.0) {
+            return originalImage; // Image is already small enough
+        }
+
+        int newWidth = (int) (width * scale);
+        int newHeight = (int) (height * scale);
+
+        BufferedImage resizedImage = new BufferedImage(newWidth, newHeight, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2d = resizedImage.createGraphics();
+        g2d.drawImage(originalImage, 0, 0, newWidth, newHeight, null);
+        g2d.dispose();
+
+        return resizedImage;
+    }
+
+    private byte[] compressImage(BufferedImage image) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(image, "jpg", baos);
+        baos.flush();
+        byte[] imageData = baos.toByteArray();
+        baos.close();
+        return imageData;
+    }
+
+    private void sendImageData(byte[] imageData) {
+        try {
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Encode image to base64
+            String imageBase64 = Base64.getEncoder().encodeToString(imageData);
+
+            // Split into chunks (500 bytes per chunk)
+            int chunkSize = 500;
+            int totalChunks = (imageBase64.length() + chunkSize - 1) / chunkSize;
+            String sessionId = Long.toHexString(System.currentTimeMillis()); // Unique ID for this transfer
+
+            if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                appendMessage("[" + timestamp + "] You (private image to " + selectedUser + ") [" + imageData.length + " bytes, " + totalChunks + " chunks]:\n");
+            } else {
+                appendMessage("[" + timestamp + "] You (broadcast image to all) [" + imageData.length + " bytes, " + totalChunks + " chunks]:\n");
+            }
+
+            // Display the sent image in the sender's chat window
+            try {
+                ByteArrayInputStream bais = new ByteArrayInputStream(imageData);
+                BufferedImage sentImage = ImageIO.read(bais);
+                bais.close();
+
+                if (sentImage != null) {
+                    // Create clickable image label with Save/Open options
+                    ImageIcon imageIcon = new ImageIcon(sentImage);
+
+                    // Scale image for display if too large
+                    Image scaledImage = imageIcon.getImage().getScaledInstance(200, 200, Image.SCALE_SMOOTH);
+                    ImageIcon scaledIcon = new ImageIcon(scaledImage);
+
+                    JLabel imageLabel = new JLabel(scaledIcon);
+                    imageLabel.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+                    // Add click listener to show Save/Open dialog for sent image
+                    byte[] finalImageData = imageData; // Final reference for lambda
+                    imageLabel.addMouseListener(new java.awt.event.MouseAdapter() {
+                        @Override
+                        public void mouseClicked(java.awt.event.MouseEvent e) {
+                            String[] options = {"Save", "Open", "Cancel"};
+                            int choice = JOptionPane.showOptionDialog(
+                                    TCPClient.this,
+                                    "What would you like to do with this image?",
+                                    "Image Options",
+                                    JOptionPane.YES_NO_CANCEL_OPTION,
+                                    JOptionPane.QUESTION_MESSAGE,
+                                    null,
+                                    options,
+                                    options[0]
+                            );
+
+                            if (choice == 0) {
+                                // Save image
+                                JFileChooser fileChooser = new JFileChooser();
+                                fileChooser.setSelectedFile(new File("sent_image_" + System.currentTimeMillis() + ".jpg"));
+                                int result = fileChooser.showSaveDialog(TCPClient.this);
+                                if (result == JFileChooser.APPROVE_OPTION) {
+                                    try {
+                                        File saveFile = fileChooser.getSelectedFile();
+                                        FileTransfer.writeFile(saveFile, finalImageData);
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Image saved to: " + saveFile.getAbsolutePath() + "\n\n");
+                                    } catch (IOException ex) {
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Error saving image: " + ex.getMessage() + "\n\n");
+                                    }
+                                }
+                            } else if (choice == 1) {
+                                // Open image
+                                try {
+                                    File tempImageFile = Files.createTempFile("temp_sent_image_", ".jpg").toFile();
+                                    FileTransfer.writeFile(tempImageFile, finalImageData);
+                                    if (java.awt.Desktop.isDesktopSupported()) {
+                                        java.awt.Desktop.getDesktop().open(tempImageFile);
+                                        tempImageFile.deleteOnExit();
+                                    } else {
+                                        JOptionPane.showMessageDialog(TCPClient.this,
+                                                "Desktop operations not supported",
+                                                "Open Error", JOptionPane.ERROR_MESSAGE);
+                                    }
+                                } catch (IOException ex) {
+                                    JOptionPane.showMessageDialog(TCPClient.this,
+                                            "Error opening image: " + ex.getMessage(),
+                                            "Open Error", JOptionPane.ERROR_MESSAGE);
+                                }
+                            }
+                        }
+                    });
+
+                    // Insert image into text pane
+                    SwingUtilities.invokeLater(() -> {
+                        try {
+                            int pos = messageArea.getDocument().getLength();
+                            messageArea.setCaretPosition(pos);
+                            messageArea.insertComponent(imageLabel);
+                            messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                        } catch (Exception e) {
+                            appendMessage("Error displaying sent image: " + e.getMessage() + "\n\n");
+                        }
+                    });
+                }
+            } catch (IOException e) {
+                appendMessage("Error displaying sent image: " + e.getMessage() + "\n");
+            }
+
+            // Send each chunk
+            for (int i = 0; i < totalChunks; i++) {
+                int start = i * chunkSize;
+                int end = Math.min(start + chunkSize, imageBase64.length());
+                String chunk = imageBase64.substring(start, end);
+
+                String formattedMessage;
+                if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                    formattedMessage = "IMGCHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|TO:" + selectedUser + "|FROM:" + username + "|DATA:" + chunk;
+                } else {
+                    formattedMessage = "IMGCHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|FROM:" + username + "|DATA:" + chunk;
+                }
+
+                out.println(formattedMessage);
+
+                // Small delay between chunks to avoid network flooding
+                Thread.sleep(10);
+            }
+        } catch (InterruptedException e) {
+            JOptionPane.showMessageDialog(this, "Image transfer interrupted: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void sendFile() {
+        if (!isConnected) {
+            JOptionPane.showMessageDialog(this, "Not connected to server!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        // Open file chooser for file selection
+        JFileChooser fileChooser = new JFileChooser();
+        int result = fileChooser.showOpenDialog(this);
+        if (result != JFileChooser.APPROVE_OPTION) {
+            return; // User cancelled
+        }
+
+        File selectedFile = fileChooser.getSelectedFile();
+
+        // Read and send file
+        try {
+            byte[] fileData = FileTransfer.readFile(selectedFile);
+            sendFileData(selectedFile.getName(), fileData);
+
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Error reading file: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void sendFileData(String filename, byte[] fileData) {
+        try {
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Encode file to base64
+            String fileBase64 = FileTransfer.encodeToBase64(fileData);
+
+            // Split into chunks (400 bytes per chunk)
+            int chunkSize = FileTransfer.CHUNK_SIZE;
+            int totalChunks = (fileBase64.length() + chunkSize - 1) / chunkSize;
+            String sessionId = Long.toHexString(System.currentTimeMillis()); // Unique ID for this transfer
+
+            if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                appendMessage("[" + timestamp + "] You (private file to " + selectedUser + "): \n");
+            } else {
+                appendMessage("[" + timestamp + "] You (broadcast file to all): \n");
+            }
+
+            // Create and insert clickable file link for sent file
+            FileLink sentFileLink = new FileLink(filename, fileData);
+
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    int pos = messageArea.getDocument().getLength();
+                    messageArea.setCaretPosition(pos);
+                    messageArea.insertComponent(sentFileLink);
+                    messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                    messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                } catch (Exception e) {
+                    appendMessage("Error displaying file link: " + e.getMessage() + "\n\n");
+                }
+            });
+
+            // Send each chunk
+            for (int i = 0; i < totalChunks; i++) {
+                int start = i * chunkSize;
+                int end = Math.min(start + chunkSize, fileBase64.length());
+                String chunk = fileBase64.substring(start, end);
+
+                String formattedMessage;
+                if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                    formattedMessage = "FILECHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|FILENAME:" + filename + "|TO:" + selectedUser + "|FROM:" + username + "|DATA:" + chunk;
+                } else {
+                    formattedMessage = "FILECHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|FILENAME:" + filename + "|FROM:" + username + "|DATA:" + chunk;
+                }
+
+                out.println(formattedMessage);
+
+                // Small delay between chunks to avoid network flooding
+                Thread.sleep(10);
+            }
+
+            appendMessage("[File sent successfully]\n\n");
+
+        } catch (InterruptedException e) {
+            JOptionPane.showMessageDialog(this, "File transfer interrupted: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void startVoiceRecording() {
+        if (!isConnected) {
+            JOptionPane.showMessageDialog(this, "Not connected to server!", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        try {
+            voiceRecorder.startRecording();
+            isRecordingVoice = true;
+            recordMicButton.setEnabled(false);
+            stopMicButton.setEnabled(true);
+            messageField.setEnabled(false);
             sendButton.setEnabled(false);
             sendImageButton.setEnabled(false);
             sendFileButton.setEnabled(false);
-            recordMicButton.setEnabled(false);
+            appendMessage("[Recording voice message...]\n");
+        } catch (LineUnavailableException e) {
+            JOptionPane.showMessageDialog(this, "Microphone not available: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void stopVoiceRecording() {
+        if (!isRecordingVoice) {
+            return;
+        }
+
+        try {
+            byte[] voiceData = voiceRecorder.stopRecording();
+            isRecordingVoice = false;
+            recordMicButton.setEnabled(true);
             stopMicButton.setEnabled(false);
-            messageField.setEnabled(false);
-            statusLabel.setText("Disconnected");
-            statusLabel.setForeground(Color.RED);
+            messageField.setEnabled(true);
+            sendButton.setEnabled(true);
+            sendImageButton.setEnabled(true);
+            sendFileButton.setEnabled(true);
 
-            appendMessage("Disconnected from server", Color.BLUE);
+            if (voiceData.length > 0) {
+                appendMessage("[Voice recording complete, sending...]\n");
+                sendVoiceData(voiceData);
+            } else {
+                appendMessage("[No audio recorded]\n");
+            }
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(this, "Error stopping recording: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    private void receiveMessages() {
+    private void sendVoiceData(byte[] voiceData) {
         try {
-            String message;
-            while (isConnected && (message = in.readLine()) != null) {
-                handleMessage(message);
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Encode voice to base64
+            String voiceBase64 = Base64.getEncoder().encodeToString(voiceData);
+
+            // Split into chunks (400 bytes per chunk)
+            int chunkSize = 400;
+            int totalChunks = (voiceBase64.length() + chunkSize - 1) / chunkSize;
+            String sessionId = Long.toHexString(System.currentTimeMillis()); // Unique ID for this transfer
+
+            if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                appendMessage("[" + timestamp + "] You (private voice to " + selectedUser + ") [" + voiceData.length + " bytes, " + totalChunks + " chunks]\n");
+            } else {
+                appendMessage("[" + timestamp + "] You (broadcast voice to all) [" + voiceData.length + " bytes, " + totalChunks + " chunks]\n");
             }
-        } catch (IOException e) {
-            if (isConnected) {
-                SwingUtilities.invokeLater(() -> {
-                    appendMessage("Connection lost", Color.RED);
-                    disconnect();
-                });
+
+            // Create and insert clickable voice link for sent message
+            VoiceLink sentVoiceLink = new VoiceLink(username, voiceData, timestamp);
+
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    int pos = messageArea.getDocument().getLength();
+                    messageArea.setCaretPosition(pos);
+                    messageArea.insertComponent(sentVoiceLink);
+                    messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                    messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                } catch (Exception e) {
+                    appendMessage("Error displaying voice link: " + e.getMessage() + "\n\n");
+                }
+            });
+
+            // Send each chunk
+            for (int i = 0; i < totalChunks; i++) {
+                int start = i * chunkSize;
+                int end = Math.min(start + chunkSize, voiceBase64.length());
+                String chunk = voiceBase64.substring(start, end);
+
+                String formattedMessage;
+                if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+                    formattedMessage = "VOICECHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|TO:" + selectedUser + "|FROM:" + username + "|DATA:" + chunk;
+                } else {
+                    formattedMessage = "VOICECHUNK|SESSION:" + sessionId + "|CHUNK:" + i + "|TOTAL:" + totalChunks + "|FROM:" + username + "|DATA:" + chunk;
+                }
+
+                out.println(formattedMessage);
+
+                // Small delay between chunks to avoid network flooding
+                Thread.sleep(10);
             }
+
+            appendMessage("[Voice sent successfully]\n\n");
+
+        } catch (InterruptedException e) {
+            JOptionPane.showMessageDialog(this, "Voice transfer interrupted: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    private void handleMessage(String message) {
-        if (message.startsWith("USERLIST:")) {
-            updateUserList(message.substring(9));
-        } else if (message.startsWith("PRIVATE:")) {
-            // Private message: PRIVATE:FROM:sender|MSG:message
-            String privateMsg = message.substring(8);
-            handlePrivateMessage(privateMsg);
-        } else if (message.startsWith("VOICECHUNK|")) {
-            handleVoiceChunk(message);
-        } else if (message.startsWith("FILECHUNK|")) {
-            handleFileChunk(message);
-        } else if (message.startsWith("IMGCHUNK|")) {
-            handleImageChunk(message);
-        } else if (message.startsWith("FROM:")) {
-            // Broadcast message
-            handleBroadcastMessage(message);
+    private void updateSendButtonLabel() {
+        if (selectedUser != null && !selectedUser.isEmpty() && !selectedUser.equals("All")) {
+            sendButton.setText("Send to " + selectedUser);
         } else {
-            // System message
-            appendMessage(message, Color.GRAY);
+            sendButton.setText("Send to All");
         }
     }
 
-    private void handlePrivateMessage(String message) {
-        // Format: FROM:sender|MSG:message
-        try {
-            int fromIndex = message.indexOf("FROM:");
-            int msgIndex = message.indexOf("|MSG:");
-
-            if (fromIndex != -1 && msgIndex != -1) {
-                String sender = message.substring(fromIndex + 5, msgIndex);
-                String msg = message.substring(msgIndex + 5);
-                appendMessage("[Private] " + sender + ": " + msg, Color.MAGENTA);
+    private void appendMessage(String message) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                messageArea.getDocument().insertString(messageArea.getDocument().getLength(), message, null);
+                messageArea.setCaretPosition(messageArea.getDocument().getLength());
+            } catch (Exception e) {
+                e.printStackTrace();
             }
-        } catch (Exception e) {
-            appendMessage("Error parsing private message", Color.RED);
-        }
+        });
     }
 
-    private void handleBroadcastMessage(String message) {
-        // Format: FROM:sender|MSG:message
-        try {
-            int msgIndex = message.indexOf("|MSG:");
-            if (msgIndex != -1) {
-                String sender = message.substring(5, msgIndex);
-                String msg = message.substring(msgIndex + 5);
-                appendMessage(sender + ": " + msg, Color.BLACK);
+    private void updateUserList(String userListStr) {
+        SwingUtilities.invokeLater(() -> {
+            // Get list of currently connected users from server
+            Set<String> connectedUserNames = new HashSet<>();
+            if (!userListStr.isEmpty()) {
+                String[] users = userListStr.split(",");
+                for (String user : users) {
+                    String trimmedUser = user.trim();
+                    // Don't add the current user to the list
+                    if (!trimmedUser.equals(username)) {
+                        connectedUserNames.add(trimmedUser);
+                    }
+                }
             }
-        } catch (Exception e) {
-            appendMessage("Error parsing message", Color.RED);
-        }
+
+            // Update existing users and mark disconnected ones
+            for (int i = 0; i < userListModel.getSize(); i++) {
+                UserStatus status = userListModel.getElementAt(i);
+                if (!status.username.equals("All")) {
+                    if (!connectedUserNames.contains(status.username)) {
+                        // User is no longer in the connected list, mark as disconnected
+                        status.isConnected = false;
+                    } else {
+                        // User is still connected
+                        status.isConnected = true;
+                    }
+                }
+            }
+
+            // Add any new users not already in the list (excluding current user)
+            for (String user : connectedUserNames) {
+                boolean found = false;
+                for (int i = 0; i < userListModel.getSize(); i++) {
+                    if (userListModel.getElementAt(i).username.equals(user)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    userListModel.addElement(new UserStatus(user, true));
+                }
+            }
+
+            // Refresh the list display
+            userList.repaint();
+
+            // Select "All" by default
+            userList.setSelectedIndex(0);
+            selectedUser = "All";
+            updateSendButtonLabel();
+        });
     }
 
-    private void handleVoiceChunk(String message) {
+    private void handleImageChunk(String response) {
         try {
-            // Format: VOICECHUNK|SESSION:id|CHUNK:num|TOTAL:total|FROM:sender|DATA:data
-            // Or: VOICECHUNK|SESSION:id|CHUNK:num|TOTAL:total|TO:recipient|FROM:sender|DATA:data
-            String[] parts = message.split("\\|");
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Parse: IMGCHUNK|SESSION:id|CHUNK:chunkNum|TOTAL:totalChunks|[TO:recipient|]FROM:sender|DATA:chunkData
+            String[] parts = response.substring(9).split("\\|");
+
             String sessionId = null;
             int chunkNum = -1;
             int totalChunks = -1;
             String sender = null;
             String recipient = null;
-            String data = null;
+            String chunkData = null;
 
             for (String part : parts) {
                 if (part.startsWith("SESSION:")) {
@@ -458,45 +1070,157 @@ public class TCPClient extends JFrame {
                 } else if (part.startsWith("TO:")) {
                     recipient = part.substring(3);
                 } else if (part.startsWith("DATA:")) {
-                    data = part.substring(5);
+                    chunkData = part.substring(5);
                 }
             }
 
-            if (sessionId != null && sender != null && data != null) {
-                String key = sender + "_" + sessionId;
-                VoiceChunkBuffer buffer = voiceChunks.get(key);
+            if (sessionId == null || chunkNum < 0 || totalChunks < 0 || sender == null || chunkData == null) {
+                appendMessage("[" + timestamp + "] Error: Invalid image chunk\n\n");
+                return;
+            }
 
-                if (buffer == null) {
-                    buffer = new VoiceChunkBuffer(totalChunks, sender, recipient);
-                    voiceChunks.put(key, buffer);
-                }
+            // Create buffer key (sender + sessionId)
+            String bufferKey = sender + "_" + sessionId;
 
-                buffer.setChunk(chunkNum, data);
+            // Get or create chunk buffer
+            ImageChunkBuffer buffer = imageChunks.get(bufferKey);
+            if (buffer == null) {
+                buffer = new ImageChunkBuffer(totalChunks, sender, recipient);
+                imageChunks.put(bufferKey, buffer);
+            }
 
-                if (buffer.isComplete()) {
-                    String completeData = buffer.getCompleteData();
-                    byte[] voiceData = Base64.getDecoder().decode(completeData);
-                    displayVoiceMessage(sender, voiceData, recipient != null);
-                    voiceChunks.remove(key);
+            // Add chunk to buffer
+            buffer.setChunk(chunkNum, chunkData);
+
+            // Check if all chunks received
+            if (buffer.isComplete()) {
+                imageChunks.remove(bufferKey);
+
+                try {
+                    // Reassemble complete base64 data
+                    String completeBase64 = buffer.getCompleteData();
+
+                    // Decode base64 to get image bytes
+                    byte[] imageData = Base64.getDecoder().decode(completeBase64);
+
+                    // Convert bytes to BufferedImage
+                    ByteArrayInputStream bais = new ByteArrayInputStream(imageData);
+                    BufferedImage receivedImage = ImageIO.read(bais);
+                    bais.close();
+
+                    if (receivedImage == null) {
+                        appendMessage("[" + timestamp + "] Error: Could not decode image\n\n");
+                        return;
+                    }
+
+                    // Create clickable image label with Save/Open options
+                    ImageIcon imageIcon = new ImageIcon(receivedImage);
+
+                    // Scale image for display if too large
+                    Image scaledImage = imageIcon.getImage().getScaledInstance(200, 200, Image.SCALE_SMOOTH);
+                    ImageIcon scaledIcon = new ImageIcon(scaledImage);
+
+                    JLabel imageLabel = new JLabel(scaledIcon);
+                    imageLabel.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+                    if (recipient != null && !recipient.isEmpty()) {
+                        appendMessage("[" + timestamp + "] (private image from " + sender + ") [" + imageData.length + " bytes]:\n");
+                    } else {
+                        appendMessage("[" + timestamp + "] (image from " + sender + ") [" + imageData.length + " bytes]:\n");
+                    }
+
+                    // Add click listener to show Save/Open dialog for image
+                    imageLabel.addMouseListener(new java.awt.event.MouseAdapter() {
+                        @Override
+                        public void mouseClicked(java.awt.event.MouseEvent e) {
+                            String[] options = {"Save", "Open", "Cancel"};
+                            int choice = JOptionPane.showOptionDialog(
+                                    TCPClient.this,
+                                    "What would you like to do with this image?",
+                                    "Image Options",
+                                    JOptionPane.YES_NO_CANCEL_OPTION,
+                                    JOptionPane.QUESTION_MESSAGE,
+                                    null,
+                                    options,
+                                    options[0]
+                            );
+
+                            if (choice == 0) {
+                                // Save image
+                                JFileChooser fileChooser = new JFileChooser();
+                                fileChooser.setSelectedFile(new File("image_" + System.currentTimeMillis() + ".jpg"));
+                                int result = fileChooser.showSaveDialog(TCPClient.this);
+                                if (result == JFileChooser.APPROVE_OPTION) {
+                                    try {
+                                        File saveFile = fileChooser.getSelectedFile();
+                                        FileTransfer.writeFile(saveFile, imageData);
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Image saved to: " + saveFile.getAbsolutePath() + "\n\n");
+                                    } catch (IOException ex) {
+                                        String saveTimestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+                                        appendMessage("[" + saveTimestamp + "] Error saving image: " + ex.getMessage() + "\n\n");
+                                    }
+                                }
+                            } else if (choice == 1) {
+                                // Open image
+                                try {
+                                    File tempImageFile = Files.createTempFile("temp_image_", ".jpg").toFile();
+                                    FileTransfer.writeFile(tempImageFile, imageData);
+                                    if (java.awt.Desktop.isDesktopSupported()) {
+                                        java.awt.Desktop.getDesktop().open(tempImageFile);
+                                        tempImageFile.deleteOnExit();
+                                    } else {
+                                        JOptionPane.showMessageDialog(TCPClient.this,
+                                                "Desktop operations not supported",
+                                                "Open Error", JOptionPane.ERROR_MESSAGE);
+                                    }
+                                } catch (IOException ex) {
+                                    JOptionPane.showMessageDialog(TCPClient.this,
+                                            "Error opening image: " + ex.getMessage(),
+                                            "Open Error", JOptionPane.ERROR_MESSAGE);
+                                }
+                            }
+                        }
+                    });
+
+                    // Insert image into text pane
+                    SwingUtilities.invokeLater(() -> {
+                        try {
+                            int pos = messageArea.getDocument().getLength();
+                            messageArea.setCaretPosition(pos);
+                            messageArea.insertComponent(imageLabel);
+                            messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                        } catch (Exception e) {
+                            appendMessage("Error displaying image: " + e.getMessage() + "\n\n");
+                        }
+                    });
+
+                } catch (IllegalArgumentException e) {
+                    appendMessage("[" + timestamp + "] Error: Could not decode image data - " + e.getMessage() + "\n\n");
                 }
             }
+
         } catch (Exception e) {
-            appendMessage("Error processing voice chunk: " + e.getMessage(), Color.RED);
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+            appendMessage("[" + timestamp + "] Error processing image chunk: " + e.getMessage() + "\n\n");
         }
     }
 
-    private void handleFileChunk(String message) {
+    private void handleFileChunk(String response) {
         try {
-            // Format: FILECHUNK|SESSION:id|CHUNK:num|TOTAL:total|FILENAME:name|FROM:sender|DATA:data
-            // Or: FILECHUNK|SESSION:id|CHUNK:num|TOTAL:total|FILENAME:name|TO:recipient|FROM:sender|DATA:data
-            String[] parts = message.split("\\|");
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Parse: FILECHUNK|SESSION:id|CHUNK:chunkNum|TOTAL:totalChunks|FILENAME:name|[TO:recipient|]FROM:sender|DATA:chunkData
+            String[] parts = response.substring(10).split("\\|");
+
             String sessionId = null;
             int chunkNum = -1;
             int totalChunks = -1;
             String filename = null;
             String sender = null;
             String recipient = null;
-            String data = null;
+            String chunkData = null;
 
             for (String part : parts) {
                 if (part.startsWith("SESSION:")) {
@@ -512,44 +1236,85 @@ public class TCPClient extends JFrame {
                 } else if (part.startsWith("TO:")) {
                     recipient = part.substring(3);
                 } else if (part.startsWith("DATA:")) {
-                    data = part.substring(5);
+                    chunkData = part.substring(5);
                 }
             }
 
-            if (sessionId != null && sender != null && filename != null && data != null) {
-                String key = sender + "_" + sessionId;
-                FileChunkBuffer buffer = fileChunks.get(key);
+            if (sessionId == null || chunkNum < 0 || totalChunks < 0 || sender == null || filename == null || chunkData == null) {
+                appendMessage("[" + timestamp + "] Error: Invalid file chunk\n\n");
+                return;
+            }
 
-                if (buffer == null) {
-                    buffer = new FileChunkBuffer(totalChunks, filename, sender, recipient);
-                    fileChunks.put(key, buffer);
-                }
+            // Create buffer key (sender + sessionId)
+            String bufferKey = sender + "_" + sessionId;
 
-                buffer.setChunk(chunkNum, data);
+            // Get or create chunk buffer
+            FileChunkBuffer buffer = fileChunks.get(bufferKey);
+            if (buffer == null) {
+                buffer = new FileChunkBuffer(totalChunks, sender, recipient, filename);
+                fileChunks.put(bufferKey, buffer);
+            }
 
-                if (buffer.isComplete()) {
-                    String completeData = buffer.getCompleteData();
-                    byte[] fileData = Base64.getDecoder().decode(completeData);
-                    displayFileMessage(sender, filename, fileData, recipient != null);
-                    fileChunks.remove(key);
+            // Add chunk to buffer
+            buffer.setChunk(chunkNum, chunkData);
+
+            // Check if all chunks received
+            if (buffer.isComplete()) {
+                fileChunks.remove(bufferKey);
+
+                try {
+                    // Reassemble complete base64 data
+                    String completeBase64 = buffer.getCompleteData();
+
+                    // Decode base64 to get file bytes
+                    byte[] fileData = FileTransfer.decodeFromBase64(completeBase64);
+
+                    if (recipient != null && !recipient.isEmpty()) {
+                        appendMessage("[" + timestamp + "] (private file from " + sender + "): \n");
+                    } else {
+                        appendMessage("[" + timestamp + "] (file from " + sender + "): \n");
+                    }
+
+                    // Create and insert clickable file link
+                    FileLink fileLink = new FileLink(filename, fileData);
+
+                    // Insert file link into message area
+                    SwingUtilities.invokeLater(() -> {
+                        try {
+                            int pos = messageArea.getDocument().getLength();
+                            messageArea.setCaretPosition(pos);
+                            messageArea.insertComponent(fileLink);
+                            messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                        } catch (Exception e) {
+                            appendMessage("Error displaying file link: " + e.getMessage() + "\n\n");
+                        }
+                    });
+
+                } catch (IllegalArgumentException e) {
+                    appendMessage("[" + timestamp + "] Error: Could not decode file data - " + e.getMessage() + "\n\n");
                 }
             }
+
         } catch (Exception e) {
-            appendMessage("Error processing file chunk: " + e.getMessage(), Color.RED);
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+            appendMessage("[" + timestamp + "] Error processing file chunk: " + e.getMessage() + "\n\n");
         }
     }
 
-    private void handleImageChunk(String message) {
+    private void handleVoiceChunk(String response) {
         try {
-            // Format: IMGCHUNK|SESSION:id|CHUNK:num|TOTAL:total|FROM:sender|DATA:data
-            // Or: IMGCHUNK|SESSION:id|CHUNK:num|TOTAL:total|TO:recipient|FROM:sender|DATA:data
-            String[] parts = message.split("\\|");
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+
+            // Parse: VOICECHUNK|SESSION:id|CHUNK:chunkNum|TOTAL:totalChunks|[TO:recipient|]FROM:sender|DATA:chunkData
+            String[] parts = response.substring(11).split("\\|");
+
             String sessionId = null;
             int chunkNum = -1;
             int totalChunks = -1;
             String sender = null;
             String recipient = null;
-            String data = null;
+            String chunkData = null;
 
             for (String part : parts) {
                 if (part.startsWith("SESSION:")) {
@@ -563,414 +1328,76 @@ public class TCPClient extends JFrame {
                 } else if (part.startsWith("TO:")) {
                     recipient = part.substring(3);
                 } else if (part.startsWith("DATA:")) {
-                    data = part.substring(5);
+                    chunkData = part.substring(5);
                 }
             }
 
-            if (sessionId != null && sender != null && data != null) {
-                String key = sender + "_" + sessionId;
-                ImageChunkBuffer buffer = imageChunks.get(key);
-
-                if (buffer == null) {
-                    buffer = new ImageChunkBuffer(totalChunks, sender, recipient);
-                    imageChunks.put(key, buffer);
-                }
-
-                buffer.setChunk(chunkNum, data);
-
-                if (buffer.isComplete()) {
-                    String completeData = buffer.getCompleteData();
-                    byte[] imageData = Base64.getDecoder().decode(completeData);
-                    displayImageMessage(sender, imageData, recipient != null);
-                    imageChunks.remove(key);
-                }
+            if (sessionId == null || chunkNum < 0 || totalChunks < 0 || sender == null || chunkData == null) {
+                appendMessage("[" + timestamp + "] Error: Invalid voice chunk\n\n");
+                return;
             }
-        } catch (Exception e) {
-            appendMessage("Error processing image chunk: " + e.getMessage(), Color.RED);
-        }
-    }
 
-    private void updateUserList(String userListStr) {
-        SwingUtilities.invokeLater(() -> {
-            String[] users = userListStr.split(",");
-            Set<String> newUsers = new HashSet<>(Arrays.asList(users));
+            // Create buffer key (sender + sessionId)
+            String bufferKey = sender + "_" + sessionId;
 
-            // Keep "All" at the top
-            UserStatus allStatus = userListModel.get(0);
-            userListModel.clear();
-            userListModel.addElement(allStatus);
-
-            // Add users
-            for (String user : users) {
-                if (!user.isEmpty()) {
-                    userListModel.addElement(new UserStatus(user, true));
-                }
+            // Get or create chunk buffer
+            VoiceChunkBuffer buffer = voiceChunks.get(bufferKey);
+            if (buffer == null) {
+                buffer = new VoiceChunkBuffer(totalChunks, sender, recipient);
+                voiceChunks.put(bufferKey, buffer);
             }
-        });
-    }
 
-    private void sendMessage() {
-        String message = messageField.getText().trim();
-        if (!message.isEmpty() && isConnected) {
-            if (selectedUser.equals("All")) {
-                out.println("FROM:" + username + "|MSG:" + message);
-                appendMessage("You: " + message, Color.BLUE);
-            } else {
-                out.println("TO:" + selectedUser + "|FROM:" + username + "|MSG:" + message);
-                appendMessage("[Private to " + selectedUser + "] You: " + message, Color.BLUE);
-            }
-            messageField.setText("");
-        }
-    }
+            // Add chunk to buffer
+            buffer.setChunk(chunkNum, chunkData);
 
-    private void sendImage() {
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setFileFilter(new FileNameExtensionFilter("Image files", "jpg", "jpeg", "png", "gif", "bmp"));
-        int result = fileChooser.showOpenDialog(this);
+            // Check if all chunks received
+            if (buffer.isComplete()) {
+                voiceChunks.remove(bufferKey);
 
-        if (result == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            new Thread(() -> {
                 try {
-                    BufferedImage originalImage = ImageIO.read(file);
-                    if (originalImage == null) {
-                        SwingUtilities.invokeLater(() -> appendMessage("Failed to read image", Color.RED));
-                        return;
+                    // Reassemble complete base64 data
+                    String completeBase64 = buffer.getCompleteData();
+
+                    // Decode base64 to get voice bytes
+                    byte[] voiceData = Base64.getDecoder().decode(completeBase64);
+
+                    if (recipient != null && !recipient.isEmpty()) {
+                        appendMessage("[" + timestamp + "] (private voice from " + sender + ") [" + voiceData.length + " bytes]:\n");
+                    } else {
+                        appendMessage("[" + timestamp + "] (voice from " + sender + ") [" + voiceData.length + " bytes]:\n");
                     }
 
-                    // Resize image
-                    BufferedImage resizedImage = resizeImage(originalImage);
+                    // Create and insert clickable voice link
+                    VoiceLink voiceLink = new VoiceLink(sender, voiceData, timestamp);
 
-                    // Convert to byte array
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    ImageIO.write(resizedImage, "jpg", baos);
-                    byte[] imageData = baos.toByteArray();
-
-                    if (imageData.length > MAX_IMAGE_SIZE) {
-                        SwingUtilities.invokeLater(() -> appendMessage("Image too large after compression (max 50KB)", Color.RED));
-                        return;
-                    }
-
-                    // Encode and send
-                    String encodedImage = Base64.getEncoder().encodeToString(imageData);
-                    sendChunkedData(encodedImage, "IMGCHUNK", 500);
-
+                    // Insert voice link into message area
                     SwingUtilities.invokeLater(() -> {
-                        if (selectedUser.equals("All")) {
-                            appendMessage("You sent an image", Color.BLUE);
-                        } else {
-                            appendMessage("[Private to " + selectedUser + "] You sent an image", Color.BLUE);
-                        }
-                    });
-
-                } catch (Exception e) {
-                    SwingUtilities.invokeLater(() -> appendMessage("Error sending image: " + e.getMessage(), Color.RED));
-                }
-            }).start();
-        }
-    }
-
-    private void sendFile() {
-        JFileChooser fileChooser = new JFileChooser();
-        int result = fileChooser.showOpenDialog(this);
-
-        if (result == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            new Thread(() -> {
-                try {
-                    byte[] fileData = Files.readAllBytes(file.toPath());
-
-                    if (fileData.length > 10_000_000) { // 10MB limit
-                        SwingUtilities.invokeLater(() -> appendMessage("File too large (max 10MB)", Color.RED));
-                        return;
-                    }
-
-                    String encodedFile = Base64.getEncoder().encodeToString(fileData);
-                    sendChunkedFile(encodedFile, file.getName());
-
-                    SwingUtilities.invokeLater(() -> {
-                        if (selectedUser.equals("All")) {
-                            appendMessage("You sent file: " + file.getName(), Color.BLUE);
-                        } else {
-                            appendMessage("[Private to " + selectedUser + "] You sent file: " + file.getName(), Color.BLUE);
-                        }
-                    });
-
-                } catch (Exception e) {
-                    SwingUtilities.invokeLater(() -> appendMessage("Error sending file: " + e.getMessage(), Color.RED));
-                }
-            }).start();
-        }
-    }
-
-    private void startVoiceRecording() {
-        try {
-            voiceRecorder = new VoiceRecorder();
-            voiceRecorder.startRecording();
-            isRecordingVoice = true;
-            recordMicButton.setEnabled(false);
-            stopMicButton.setEnabled(true);
-            appendMessage("Recording voice...", Color.BLUE);
-        } catch (LineUnavailableException e) {
-            appendMessage("Error starting voice recording: " + e.getMessage(), Color.RED);
-        }
-    }
-
-    private void stopVoiceRecording() {
-        if (isRecordingVoice && voiceRecorder != null) {
-            byte[] voiceData = voiceRecorder.stopRecording();
-            isRecordingVoice = false;
-            recordMicButton.setEnabled(true);
-            stopMicButton.setEnabled(false);
-
-            if (voiceData != null && voiceData.length > 0) {
-                new Thread(() -> {
-                    try {
-                        String encodedVoice = Base64.getEncoder().encodeToString(voiceData);
-                        sendChunkedData(encodedVoice, "VOICECHUNK", 400);
-
-                        SwingUtilities.invokeLater(() -> {
-                            if (selectedUser.equals("All")) {
-                                appendMessage("You sent a voice message", Color.BLUE);
-                            } else {
-                                appendMessage("[Private to " + selectedUser + "] You sent a voice message", Color.BLUE);
-                            }
-                        });
-                    } catch (Exception e) {
-                        SwingUtilities.invokeLater(() -> appendMessage("Error sending voice: " + e.getMessage(), Color.RED));
-                    }
-                }).start();
-            } else {
-                appendMessage("No voice data recorded", Color.RED);
-            }
-        }
-    }
-
-    private void sendChunkedData(String data, String chunkType, int chunkSize) {
-        String sessionId = Long.toHexString(System.currentTimeMillis());
-        int totalChunks = (int) Math.ceil((double) data.length() / chunkSize);
-
-        for (int i = 0; i < totalChunks; i++) {
-            int start = i * chunkSize;
-            int end = Math.min(start + chunkSize, data.length());
-            String chunk = data.substring(start, end);
-
-            StringBuilder message = new StringBuilder();
-            message.append(chunkType).append("|")
-                    .append("SESSION:").append(sessionId).append("|")
-                    .append("CHUNK:").append(i).append("|")
-                    .append("TOTAL:").append(totalChunks).append("|");
-
-            if (!selectedUser.equals("All")) {
-                message.append("TO:").append(selectedUser).append("|");
-            }
-
-            message.append("FROM:").append(username).append("|")
-                    .append("DATA:").append(chunk);
-
-            out.println(message.toString());
-        }
-    }
-
-    private void sendChunkedFile(String data, String filename) {
-        String sessionId = Long.toHexString(System.currentTimeMillis());
-        int chunkSize = 400;
-        int totalChunks = (int) Math.ceil((double) data.length() / chunkSize);
-
-        for (int i = 0; i < totalChunks; i++) {
-            int start = i * chunkSize;
-            int end = Math.min(start + chunkSize, data.length());
-            String chunk = data.substring(start, end);
-
-            StringBuilder message = new StringBuilder();
-            message.append("FILECHUNK|")
-                    .append("SESSION:").append(sessionId).append("|")
-                    .append("CHUNK:").append(i).append("|")
-                    .append("TOTAL:").append(totalChunks).append("|")
-                    .append("FILENAME:").append(filename).append("|");
-
-            if (!selectedUser.equals("All")) {
-                message.append("TO:").append(selectedUser).append("|");
-            }
-
-            message.append("FROM:").append(username).append("|")
-                    .append("DATA:").append(chunk);
-
-            out.println(message.toString());
-        }
-    }
-
-    private BufferedImage resizeImage(BufferedImage originalImage) {
-        int width = originalImage.getWidth();
-        int height = originalImage.getHeight();
-
-        if (width <= MAX_IMAGE_WIDTH && height <= MAX_IMAGE_HEIGHT) {
-            return originalImage;
-        }
-
-        double scale = Math.min((double) MAX_IMAGE_WIDTH / width, (double) MAX_IMAGE_HEIGHT / height);
-        int newWidth = (int) (width * scale);
-        int newHeight = (int) (height * scale);
-
-        BufferedImage resizedImage = new BufferedImage(newWidth, newHeight, BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = resizedImage.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-        g.drawImage(originalImage, 0, 0, newWidth, newHeight, null);
-        g.dispose();
-
-        return resizedImage;
-    }
-
-    private void displayImageMessage(String sender, byte[] imageData, boolean isPrivate) {
-        SwingUtilities.invokeLater(() -> {
-            try {
-                ByteArrayInputStream bais = new ByteArrayInputStream(imageData);
-                BufferedImage image = ImageIO.read(bais);
-
-                if (image != null) {
-                    String prefix = isPrivate ? "[Private] " : "";
-                    appendImageMessage(prefix + sender + " sent an image:", image, imageData);
-                }
-            } catch (Exception e) {
-                appendMessage("Error displaying image: " + e.getMessage(), Color.RED);
-            }
-        });
-    }
-
-    private void displayFileMessage(String sender, String filename, byte[] fileData, boolean isPrivate) {
-        SwingUtilities.invokeLater(() -> {
-            String prefix = isPrivate ? "[Private] " : "";
-            FileLink fileLink = new FileLink(filename, fileData);
-            appendFileMessage(prefix + sender + " sent a file:", fileLink);
-        });
-    }
-
-    private void displayVoiceMessage(String sender, byte[] voiceData, boolean isPrivate) {
-        SwingUtilities.invokeLater(() -> {
-            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
-            String timestamp = sdf.format(new Date());
-            String prefix = isPrivate ? "[Private] " : "";
-            VoiceLink voiceLink = new VoiceLink(sender, voiceData, timestamp);
-            appendVoiceMessage(prefix + sender + " sent a voice message:", voiceLink);
-        });
-    }
-
-    private void appendMessage(String message, Color color) {
-        SwingUtilities.invokeLater(() -> {
-            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
-            String timestamp = sdf.format(new Date());
-            String colorHex = String.format("#%02x%02x%02x", color.getRed(), color.getGreen(), color.getBlue());
-
-            String html = "<div style='color:" + colorHex + ";'>[" + timestamp + "] " + message + "</div>";
-            appendToMessageArea(html);
-        });
-    }
-
-    private void appendImageMessage(String message, BufferedImage image, byte[] imageData) {
-        SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
-        String timestamp = sdf.format(new Date());
-
-        JPanel panel = new JPanel(new BorderLayout());
-        JLabel label = new JLabel("[" + timestamp + "] " + message);
-        panel.add(label, BorderLayout.NORTH);
-
-        JLabel imageLabel = new JLabel();
-        ImageIcon icon = new ImageIcon(image.getScaledInstance(200, 200, Image.SCALE_SMOOTH));
-        imageLabel.setIcon(icon);
-        imageLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        imageLabel.addMouseListener(new java.awt.event.MouseAdapter() {
-            public void mouseClicked(java.awt.event.MouseEvent evt) {
-                int result = JOptionPane.showOptionDialog(TCPClient.this,
-                        "What would you like to do with this image?",
-                        "Image Options",
-                        JOptionPane.YES_NO_OPTION,
-                        JOptionPane.QUESTION_MESSAGE,
-                        null,
-                        new String[]{"Save", "Open", "Cancel"},
-                        "Save");
-
-                if (result == 0) { // Save
-                    JFileChooser fc = new JFileChooser();
-                    fc.setSelectedFile(new File("image_" + System.currentTimeMillis() + ".jpg"));
-                    if (fc.showSaveDialog(TCPClient.this) == JFileChooser.APPROVE_OPTION) {
                         try {
-                            Files.write(fc.getSelectedFile().toPath(), imageData);
-                            appendMessage("Image saved to " + fc.getSelectedFile().getAbsolutePath(), Color.GREEN);
-                        } catch (IOException e) {
-                            appendMessage("Error saving image: " + e.getMessage(), Color.RED);
+                            int pos = messageArea.getDocument().getLength();
+                            messageArea.setCaretPosition(pos);
+                            messageArea.insertComponent(voiceLink);
+                            messageArea.getDocument().insertString(messageArea.getDocument().getLength(), "\n\n", null);
+                            messageArea.setCaretPosition(messageArea.getDocument().getLength());
+                        } catch (Exception e) {
+                            appendMessage("Error displaying voice link: " + e.getMessage() + "\n\n");
                         }
-                    }
-                } else if (result == 1) { // Open
-                    try {
-                        File tempFile = File.createTempFile("image_", ".jpg");
-                        Files.write(tempFile.toPath(), imageData);
-                        Desktop.getDesktop().open(tempFile);
-                    } catch (IOException e) {
-                        appendMessage("Error opening image: " + e.getMessage(), Color.RED);
-                    }
+                    });
+
+                } catch (IllegalArgumentException e) {
+                    appendMessage("[" + timestamp + "] Error: Could not decode voice data - " + e.getMessage() + "\n\n");
                 }
             }
-        });
 
-        panel.add(imageLabel, BorderLayout.CENTER);
-        appendComponentToMessageArea(panel);
-    }
-
-    private void appendFileMessage(String message, FileLink fileLink) {
-        SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
-        String timestamp = sdf.format(new Date());
-
-        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        JLabel label = new JLabel("[" + timestamp + "] " + message + " ");
-        panel.add(label);
-        panel.add(fileLink);
-
-        appendComponentToMessageArea(panel);
-    }
-
-    private void appendVoiceMessage(String message, VoiceLink voiceLink) {
-        SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss");
-        String timestamp = sdf.format(new Date());
-
-        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        JLabel label = new JLabel("[" + timestamp + "] " + message + " ");
-        panel.add(label);
-        panel.add(voiceLink);
-
-        appendComponentToMessageArea(panel);
-    }
-
-    private void appendToMessageArea(String html) {
-        try {
-            javax.swing.text.Document doc = messageArea.getDocument();
-            javax.swing.text.html.HTMLEditorKit kit = (javax.swing.text.html.HTMLEditorKit) messageArea.getEditorKit();
-            kit.insertHTML((javax.swing.text.html.HTMLDocument) doc, doc.getLength(), html, 0, 0, null);
-            messageArea.setCaretPosition(doc.getLength());
         } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void appendComponentToMessageArea(JComponent component) {
-        try {
-            javax.swing.text.Document doc = messageArea.getDocument();
-            messageArea.setCaretPosition(doc.getLength());
-            messageArea.insertComponent(component);
-            javax.swing.text.html.HTMLEditorKit kit = (javax.swing.text.html.HTMLEditorKit) messageArea.getEditorKit();
-            kit.insertHTML((javax.swing.text.html.HTMLDocument) doc, doc.getLength(), "<br>", 0, 0, null);
-        } catch (Exception e) {
-            e.printStackTrace();
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+            appendMessage("[" + timestamp + "] Error processing voice chunk: " + e.getMessage() + "\n\n");
         }
     }
 
     public static void main(String[] args) {
-        if (args.length > 0) {
-            new TCPClient(args[0]);
-        } else {
-            String username = JOptionPane.showInputDialog("Enter your username:");
-            if (username != null && !username.trim().isEmpty()) {
-                new TCPClient(username.trim());
-            }
-        }
+        SwingUtilities.invokeLater(() -> {
+            TCPClient client = new TCPClient();
+            client.setVisible(true);
+        });
     }
 }

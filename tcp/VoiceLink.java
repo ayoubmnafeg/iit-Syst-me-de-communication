@@ -12,22 +12,20 @@ import java.io.*;
 public class VoiceLink extends JLabel {
     private byte[] voiceData;
     private String sender;
+    private String timestamp;
     private long duration; // Estimated duration in seconds
-
-    public VoiceLink(byte[] voiceData) {
-        this("Unknown", voiceData, "");
-    }
 
     public VoiceLink(String sender, byte[] voiceData, String timestamp) {
         this.sender = sender;
         this.voiceData = voiceData;
+        this.timestamp = timestamp;
 
         // Estimate duration based on WAV file (rough calculation)
         this.duration = estimateDuration(voiceData);
 
         // Create HTML link-style text
         String sizeStr = getFileSizeString(voiceData.length);
-        setText("<html><u><font color='blue'>🔊 Voice (" + duration + "s, " + sizeStr + ")</font></u></html>");
+        setText("<html><u><font color='blue'>🔊 Voice from " + sender + " (" + duration + "s, " + sizeStr + ")</font></u></html>");
 
         // Set pointer cursor on hover
         setCursor(new Cursor(Cursor.HAND_CURSOR));
@@ -42,13 +40,13 @@ public class VoiceLink extends JLabel {
             @Override
             public void mouseEntered(MouseEvent e) {
                 // Change text color on hover
-                setText("<html><u><font color='darkblue'>🔊 Voice (" + duration + "s, " + sizeStr + ")</font></u></html>");
+                setText("<html><u><font color='darkblue'>🔊 Voice from " + sender + " (" + duration + "s, " + sizeStr + ")</font></u></html>");
             }
 
             @Override
             public void mouseExited(MouseEvent e) {
                 // Restore original color
-                setText("<html><u><font color='blue'>🔊 Voice (" + duration + "s, " + sizeStr + ")</font></u></html>");
+                setText("<html><u><font color='blue'>🔊 Voice from " + sender + " (" + duration + "s, " + sizeStr + ")</font></u></html>");
             }
         });
     }
@@ -64,7 +62,7 @@ public class VoiceLink extends JLabel {
             String[] options = {"Play", "Save", "Cancel"};
             int choice = JOptionPane.showOptionDialog(
                     parentWindow,
-                    "Voice message (" + duration + "s)\n\nWhat would you like to do?",
+                    "Voice message from " + sender + " (" + duration + "s)\n\nWhat would you like to do?",
                     "Voice Message",
                     JOptionPane.YES_NO_CANCEL_OPTION,
                     JOptionPane.QUESTION_MESSAGE,
@@ -85,7 +83,7 @@ public class VoiceLink extends JLabel {
     }
 
     private void playVoice() {
-        new Thread(() -> {
+        SwingUtilities.invokeLater(() -> {
             try {
                 // Parse WAV file and play it
                 ByteArrayInputStream bais = new ByteArrayInputStream(voiceData);
@@ -101,15 +99,12 @@ public class VoiceLink extends JLabel {
                     parentWindow = new JFrame();
                 }
 
-                final Window finalWindow = parentWindow;
-                SwingUtilities.invokeLater(() -> {
-                    JOptionPane.showMessageDialog(
-                            finalWindow,
-                            "Playing voice message...\nDuration: " + duration + " seconds",
-                            "Playing",
-                            JOptionPane.INFORMATION_MESSAGE
-                    );
-                });
+                JOptionPane.showMessageDialog(
+                        parentWindow,
+                        "Playing voice message...\nDuration: " + duration + " seconds",
+                        "Playing",
+                        JOptionPane.INFORMATION_MESSAGE
+                );
 
                 // Wait for playback to finish
                 while (clip.isRunning()) {
@@ -123,17 +118,14 @@ public class VoiceLink extends JLabel {
                     parentWindow = new JFrame();
                 }
 
-                final Window finalWindow = parentWindow;
-                SwingUtilities.invokeLater(() -> {
-                    JOptionPane.showMessageDialog(
-                            finalWindow,
-                            "Error playing voice: " + e.getMessage(),
-                            "Play Error",
-                            JOptionPane.ERROR_MESSAGE
-                    );
-                });
+                JOptionPane.showMessageDialog(
+                        parentWindow,
+                        "Error playing voice: " + e.getMessage(),
+                        "Play Error",
+                        JOptionPane.ERROR_MESSAGE
+                );
             }
-        }).start();
+        });
     }
 
     private void saveVoice() {
@@ -144,7 +136,7 @@ public class VoiceLink extends JLabel {
             }
 
             JFileChooser fileChooser = new JFileChooser();
-            fileChooser.setSelectedFile(new File("voice_" + System.currentTimeMillis() + ".wav"));
+            fileChooser.setSelectedFile(new File("voice_" + sender + "_" + System.currentTimeMillis() + ".wav"));
             int result = fileChooser.showSaveDialog(parentWindow);
 
             if (result == JFileChooser.APPROVE_OPTION) {
@@ -185,8 +177,8 @@ public class VoiceLink extends JLabel {
         try {
             // Read sample rate from WAV header (bytes 24-27)
             int sampleRate = readIntLittleEndian(wavData, 24);
-            // Read number of channels (bytes 22-23)
-            int channels = readShortLittleEndian(wavData, 22);
+            // Read number of channels (bytes 8-9)
+            int channels = readShortLittleEndian(wavData, 8);
             // Read bits per sample (bytes 34-35)
             int bitsPerSample = readShortLittleEndian(wavData, 34);
 

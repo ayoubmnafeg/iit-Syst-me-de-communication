@@ -6,7 +6,7 @@ import java.util.Base64;
  * Provides methods to compress files and encode them for TCP transmission
  */
 public class FileTransfer {
-    public static final int CHUNK_SIZE = 400; // 400 bytes per chunk for compatibility
+    public static final int CHUNK_SIZE = 400; // 400 bytes per chunk for transmission
     public static final int MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB max file size
 
     /**
